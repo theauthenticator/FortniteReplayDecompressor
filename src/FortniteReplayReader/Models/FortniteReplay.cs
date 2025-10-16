@@ -1,6 +1,7 @@
 ﻿using FortniteReplayReader.Models.Events;
 using System.Collections.Generic;
 using Unreal.Core.Models;
+using FortniteReplayReader.Models.Damage;  // <- new using statement
 
 namespace FortniteReplayReader.Models;
 
@@ -45,4 +46,9 @@ public class FortniteReplay : Replay
     /// Map information
     /// </summary>
     public MapData MapData { get; internal set; } = new MapData();
+
+    /// <summary>
+    /// Damage summary for players in the replay.
+    /// </summary>
+    public DamageSummary? DamageSummary { get; set; }  
 }

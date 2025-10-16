@@ -597,6 +597,12 @@ public class NetFieldParser
     /// </summary>
     public IProperty? CreatePropertyType(string group, string propertyName)
     {
+   
+        if (propertyName == "OwnerPersistentID")
+        {
+            return new PersistentIdProperty();
+        }
+
         if (_classNetCacheToNetFieldGroup.TryGetValue(group, out var groupInfo))
         {
             if (groupInfo.Properties.TryGetValue(propertyName, out var fieldInfo))

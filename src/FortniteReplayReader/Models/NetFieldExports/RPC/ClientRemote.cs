@@ -5,7 +5,7 @@ using Unreal.Core.Models.Enums;
 
 namespace FortniteReplayReader.Models.NetFieldExports.RPC;
 
-[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerAddMapMarker", minimalParseMode: ParseMode.Debug)]
+[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerAddMapMarker", minimalParseMode: ParseMode.Full)]
 public class AddMapMarker : INetFieldExportGroup
 {
     [NetFieldExport("PlayerID", RepLayoutCmdType.PropertyInt)]
@@ -16,9 +16,6 @@ public class AddMapMarker : INetFieldExportGroup
 
     [NetFieldExport("Owner", RepLayoutCmdType.Ignore)]
     public int Owner { get; set; }
-
-    //[NetFieldExport("MarkerType", RepLayoutCmdType.Ignore)]
-    //public DebuggingObject MarkerType { get; set; }
 
     [NetFieldExport("WorldPosition", RepLayoutCmdType.PropertyVector)]
     public FVector WorldPosition { get; set; }
@@ -35,9 +32,6 @@ public class AddMapMarker : INetFieldExportGroup
     [NetFieldExport("ItemCount", RepLayoutCmdType.PropertyInt)]
     public int ItemCount { get; set; }
 
-    //[NetFieldExport("MarkedActorClass", RepLayoutCmdType.Ignore)]
-    //public DebuggingObject MarkedActorClass { get; set; }
-
     [NetFieldExport("MarkedActor", RepLayoutCmdType.PropertyObject)]
     public uint MarkedActor { get; set; }
 
@@ -46,9 +40,6 @@ public class AddMapMarker : INetFieldExportGroup
 
     [NetFieldExport("DisplayName", RepLayoutCmdType.Property)]
     public FText DisplayName { get; set; }
-
-    //[NetFieldExport("CustomIndicatorClass", RepLayoutCmdType.Ignore)]
-    //public DebuggingObject CustomIndicatorClass { get; set; }
 
     [NetFieldExport("Icon", RepLayoutCmdType.PropertyString)]
     public string Icon { get; set; }
@@ -64,15 +55,9 @@ public class AddMapMarker : INetFieldExportGroup
 
     [NetFieldExport("A", RepLayoutCmdType.PropertyFloat)]
     public float A { get; set; }
-
-    //[NetFieldExport("Sound", RepLayoutCmdType.Ignore)]
-    //public DebuggingObject Sound { get; set; }
-
-    //[NetFieldExport("ScreenClamping", RepLayoutCmdType.Ignore)]
-    //public DebuggingObject ScreenClamping { get; set; }
 }
 
-[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerRemoveMapMarker", minimalParseMode: ParseMode.Debug)]
+[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerRemoveMapMarker", minimalParseMode: ParseMode.Full)]
 public class RemoveMapMarker : INetFieldExportGroup
 {
     [NetFieldExport("PlayerID", RepLayoutCmdType.PropertyInt)]
@@ -82,7 +67,7 @@ public class RemoveMapMarker : INetFieldExportGroup
     public int InstanceID { get; set; }
 }
 
-[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", minimalParseMode: ParseMode.Debug)]
+[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", minimalParseMode: ParseMode.Full)]
 public class PlayerDamagedResourceBuilding : INetFieldExportGroup
 {
     [NetFieldExport("BuildingSMActor", RepLayoutCmdType.PropertyInt)]

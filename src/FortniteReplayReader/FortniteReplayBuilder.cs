@@ -4,6 +4,10 @@ using FortniteReplayReader.Models.NetFieldExports.Weapons;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
+using Unreal.Core.Models; // for NetworkGUID
+using Unreal.Core.Contracts; // for INetFieldExportGroup
+using System.Collections.Generic;
+using System;
 
 namespace FortniteReplayReader;
 
@@ -15,6 +19,9 @@ public class FortniteReplayBuilder
     private readonly GameData GameData = new();
     private readonly MapData MapData = new();
     private readonly List<KillFeedEntry> KillFeed = new();
+
+    private readonly Dictionary<uint, HealthSet> _previousHealthSets = new();
+    private readonly Dictionary<uint, string> _channelToPlayerId = new();
 
     private readonly Dictionary<uint, uint> _actorToChannel = new();
     private readonly Dictionary<uint, uint> _channelToActor = new();
@@ -38,6 +45,32 @@ public class FortniteReplayBuilder
 
     private float? ReplicatedWorldTimeSeconds = 0;
     private double? ReplicatedWorldTimeSecondsDouble = 0;
+
+    private readonly Dictionary<NetworkGUID, INetFieldExportGroup> actorExportGroups
+       = new Dictionary<NetworkGUID, INetFieldExportGroup>();
+
+    /// <summary>
+    /// Registers an export group for an actor.
+    /// Call this whenever a new export group is created or updated.
+    /// </summary>
+    public void RegisterExportGroup(NetworkGUID actor, INetFieldExportGroup exportGroup)
+    {
+        if (exportGroup != null)
+        {
+            actorExportGroups[actor] = exportGroup;
+        }
+    }
+
+    /// <summary>
+    /// Returns the export group for a given actor GUID, or null if none exists.
+    /// </summary>
+    public INetFieldExportGroup? GetExportGroup(NetworkGUID actor)
+    {
+        if (actorExportGroups.TryGetValue(actor, out var group))
+            return group;
+
+        return null;
+    }
 
     public void AddActorChannel(uint channelIndex, uint guid)
     {
@@ -106,6 +139,9 @@ public class FortniteReplayBuilder
 
     public void UpdateGameState(GameState state)
     {
+
+    
+
         GameData.GameSessionId ??= state?.GameSessionId;
         GameData.UtcTimeStartedMatch ??= state.UtcTimeStartedMatch?.Time;
         GameData.MatchEndTime ??= state.EndGameStartTime;
@@ -130,7 +166,13 @@ public class FortniteReplayBuilder
 
         if (state.ReplicatedWorldTimeSeconds != null)
         {
+            Console.WriteLine($"⏰ TIME UPDATE: ReplicatedWorldTimeSeconds -> {state.ReplicatedWorldTimeSeconds}");
+
             ReplicatedWorldTimeSeconds = state.ReplicatedWorldTimeSeconds;
+        }
+        else
+        {
+            Console.WriteLine($"⚠️ GameState.ReplicatedWorldTimeSeconds is NULL");
         }
 
         if (state.ReplicatedWorldTimeSecondsDouble != null)
@@ -151,6 +193,11 @@ public class FortniteReplayBuilder
         }
     }
 
+
+    public IEnumerable<PlayerData> GetAllPlayers()
+    {
+        return _players.Values;
+    }
     public void UpdatePlaylistInfo(PlaylistInfo playlist) => GameData.CurrentPlaylist ??= playlist.Name;
 
     public void UpdateGameplayModifiers(ActiveGameplayModifier modifier) => GameData.ActiveGameplayModifiers.Add(modifier.ModifierDef?.Name);
@@ -330,7 +377,6 @@ public class FortniteReplayBuilder
             }
 
             playerState = _players[stateChannelIndex];
-
         }
         else
         {
@@ -339,6 +385,8 @@ public class FortniteReplayBuilder
                 return;
             }
         }
+
+        
 
         playerState.Cosmetics.Character ??= pawn.Character?.Name;
         playerState.Cosmetics.BannerColorId ??= pawn.BannerColorId;
@@ -387,9 +435,7 @@ public class FortniteReplayBuilder
             };
             playerState.Locations.Add(newLocation);
         }
-
     }
-
     public void UpdateInventory(uint channelIndex, FortInventory fortInventory)
     {
         if (!_inventories.TryGetValue(channelIndex, out var inventory))
@@ -424,25 +470,25 @@ public class FortniteReplayBuilder
             }
         }
 
-        if (!fortInventory.A.HasValue)
-        {
-            return;
-        }
+        // if (!fortInventory.A.HasValue)
+        //  {
+        //     return;
+        //  }
 
-        var inventoryItem = new InventoryItem()
-        {
-            Count = fortInventory.Count,
-            ItemDefinition = fortInventory.ItemDefinition?.Name,
-            OrderIndex = fortInventory.OrderIndex,
-            Durability = fortInventory.Durability,
-            Level = fortInventory.Level,
-            LoadedAmmo = fortInventory.LoadedAmmo,
-            A = fortInventory.A,
-            B = fortInventory.B,
-            C = fortInventory.C,
-            D = fortInventory.D
-        };
-        inventory.Items.Add(inventoryItem);
+        //var inventoryItem = new InventoryItem()
+        //{
+        //  Count = fortInventory.Count,
+        // ItemDefinition = fortInventory.ItemDefinition?.Name,
+        // OrderIndex = fortInventory.OrderIndex,
+        // Durability = fortInventory.Durability,
+        // Level = fortInventory.Level,
+        //  LoadedAmmo = fortInventory.LoadedAmmo,
+        // A = fortInventory.A,
+        //  B = fortInventory.B,
+        //  C = fortInventory.C,
+        //  D = fortInventory.D
+        // };
+        // inventory.Items.Add(inventoryItem);
     }
 
     public void UpdateWeapon(uint channelIndex, BaseWeapon weapon)
@@ -482,6 +528,8 @@ public class FortniteReplayBuilder
         MapData.SafeZones.Add(new SafeZone(safeZone));
     }
 
+
+
     public void UpdateLlama(uint channelIndex, SupplyDropLlama supplyDropLlama)
     {
         if (!_llamas.TryGetValue(channelIndex, out var llama))
@@ -506,6 +554,7 @@ public class FortniteReplayBuilder
             llama.HasSpawnedPickups = true;
         }
     }
+
 
     public void UpdateSupplyDrop(uint channelIndex, Models.NetFieldExports.SupplyDrop supplyDrop)
     {
@@ -575,4 +624,55 @@ public class FortniteReplayBuilder
     //{
     //    // ¯\_(ツ)_/¯
     //}
+
+
+    /// <summary>
+    /// Get the player ID associated with a channel
+    /// </summary>
+    public string GetPlayerIdFromChannel(uint channelIndex)
+    {
+        if (_channelToPlayerId.TryGetValue(channelIndex, out var playerId))
+        {
+            return playerId;
+        }
+
+        // Try to get from player data
+        if (_players.TryGetValue(channelIndex, out var playerData))
+        {
+            return playerData.PlayerId ?? playerData.Id?.ToString() ?? string.Empty;
+        }
+
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Get the current replay time
+    /// </summary>
+    public float GetCurrentTime()
+    {
+        return ReplicatedWorldTimeSeconds ?? 0f;
+    }
+
+    public double GetCurrentTimeDouble()
+    {
+        return ReplicatedWorldTimeSecondsDouble ?? 0.0;
+    }
+
+
+    /// <summary>
+    /// Get the previous health set for a channel (for damage tracking)
+    /// </summary>
+    public HealthSet GetPreviousHealthSet(uint channelIndex)
+    {
+        _previousHealthSets.TryGetValue(channelIndex, out var healthSet);
+        return healthSet;
+    }
+
+    /// <summary>
+    /// Update the health set for a channel
+    /// </summary>
+    public void UpdateHealthSet(uint channelIndex, HealthSet healthSet)
+    {
+        _previousHealthSets[channelIndex] = healthSet;
+    }
 }

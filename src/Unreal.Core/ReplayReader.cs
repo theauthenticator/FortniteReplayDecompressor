@@ -1446,7 +1446,9 @@ public abstract class ReplayReader<T> where T : Replay, new()
             return false;
         }
 
-        if (Channels[channelIndex]!.IsIgnoringGroup(group.PathName))
+        // Don't ignore pickaxe channels
+        if (Channels[channelIndex]!.IsIgnoringGroup(group.PathName)
+            && !group.PathName.Contains("Pickaxe")) // ← Add this condition
         {
             _logger?.LogInformation("Ignoring channel for type {}", group.PathName);
             return false;
@@ -1634,23 +1636,32 @@ public abstract class ReplayReader<T> where T : Replay, new()
 
         if (!_netFieldParser.WillReadType(group.PathName))
         {
-            _logger?.LogInformation("Not reading type {}", group.PathName);
-            Channels[channelIndex]!.IgnoreGroup(group.PathName);
+            // Force read FortBroadcastRemoteClientInfo regardless of parse mode
+            if (group.PathName != "/Script/FortniteGame.FortBroadcastRemoteClientInfo" && !group.PathName.Contains("Pickaxe"))
+            {
+                _logger?.LogInformation("Not reading type {}", group.PathName);
+                Channels[channelIndex]!.IgnoreGroup(group.PathName);
 
 #if DEBUG
-            Debug("not-reading-groups", group.PathName);
-            foreach (var field in group.NetFieldExports)
-            {
-                if (field == null)
+                Debug("not-reading-groups", group.PathName);
+                foreach (var field in group.NetFieldExports)
                 {
-                    continue;
-                }
+                    if (field == null)
+                    {
+                        continue;
+                    }
 
-                Debug("not-reading-groups", $"\t\t{field.Name}");
-            }
+                    Debug("not-reading-groups", $"\t\t{field.Name}");
+                }
 #endif
 
-            return false;
+                return false;
+            }
+            else
+            {
+                // Force reading FortBroadcastRemoteClientInfo for harvest tracking
+                _logger?.LogInformation("Forcing read of FortBroadcastRemoteClientInfo for harvest tracking");
+            }
         }
 
         if (enablePropertyChecksum)
@@ -1659,6 +1670,43 @@ public abstract class ReplayReader<T> where T : Replay, new()
         }
 
         _logger?.LogDebug("ReceiveProperties: group {}", group.PathName);
+
+
+        if (group.PathName == "/Script/FortniteGame.FortBroadcastRemoteClientInfo")
+        {
+            _logger?.LogWarning("=== RAW FortBroadcastRemoteClientInfo DATA ===");
+            _logger?.LogWarning("Channel: {}", channelIndex);
+            _logger?.LogWarning("Group has {} exports", group.NetFieldExportsLength);
+
+            foreach (var field in group.NetFieldExports)
+            {
+                if (field != null)
+                {
+                    _logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
+                }
+                else
+                {
+                    _logger?.LogWarning("   Export: <null>");
+                }
+            }
+        }
+
+        if (group.PathName.Contains("Pickaxe"))
+        {
+            _logger?.LogWarning("=== PICKAXE CHANNEL DATA ===");
+            _logger?.LogWarning($"Channel: {channelIndex}");
+            _logger?.LogWarning($"PathName: {group.PathName}");
+            _logger?.LogWarning($"Group has {group.NetFieldExportsLength} exports");
+
+            foreach (var field in group.NetFieldExports)
+            {
+                if (field != null)
+                {
+                    _logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
+                }
+            }
+        }
+
         exportGroup = _netFieldParser.CreateType(group.PathName);
 
         if (exportGroup is null)
@@ -1689,7 +1737,26 @@ public abstract class ReplayReader<T> where T : Replay, new()
             }
 
             var export = group.NetFieldExports[handle];
+
             var numBits = archive.ReadIntPacked();
+
+            // Add this RIGHT AFTER the numBits line:
+            if (group.PathName == "/Script/FortniteGame.FortBroadcastRemoteClientInfo" && numBits > 0)
+            {
+                _logger?.LogWarning("Reading property: handle={}, name={}, numBits={}", handle, export?.Name, numBits);
+
+                if (group.PathName.Contains("Pickaxe"))
+                {
+                    _logger?.LogWarning($"✅ Pickaxe property READING: handle={handle}, name={export?.Name}, numBits={numBits}");
+                }
+            }
+
+            if (numBits == 0)
+            {
+                continue;
+            }
+
+
 
             if (numBits == 0)
             {
@@ -1706,6 +1773,13 @@ public abstract class ReplayReader<T> where T : Replay, new()
             if (export.Incompatible)
             {
                 _logger?.LogDebug("Incompatible export {name} for group {pathName}, numbits is {numBits}", export.Name, group.PathName, numBits);
+
+                // Add pickaxe-specific logging
+                if (group.PathName.Contains("Pickaxe"))
+                {
+                    _logger?.LogError($"❌ UNIMPLEMENTED Pickaxe property: {export.Name}, handle={handle}, numBits={numBits}");
+                }
+
                 archive.SkipBits(numBits);
                 // We've already warned that this property doesn't load anymore
                 continue;
@@ -1750,6 +1824,12 @@ public abstract class ReplayReader<T> where T : Replay, new()
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "NetFieldParser exception for property: {}, path: {}", export.Name, group.PathName);
+
+                _cmdReader.Reset();
+                var rawBits = _cmdReader.ReadBits(_cmdReader.GetBitsLeft());
+                _logger?.LogError("Raw bits for failed property: {bits}",
+                    BitConverter.ToString(rawBits.ToArray()));
+
 #if DEBUG
                 Debug("failed-properties", $"Property {export.Name} (handle: {handle}, path: {group.PathName}, bits: {numBits}) threw exception {ex.Message}");
 #endif
@@ -2216,8 +2296,8 @@ public abstract class ReplayReader<T> where T : Replay, new()
     /// </summary>
     protected virtual void OnChannelOpened(uint channelIndex, NetworkGUID? actor)
     {
-
     }
+
 
     /// <summary>
     /// Notifies when a channel is closed.

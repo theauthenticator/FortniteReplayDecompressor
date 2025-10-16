@@ -4,12 +4,12 @@ using Unreal.Core.Models.Enums;
 
 namespace FortniteReplayReader.Models.NetFieldExports.Weapons;
 
-[NetFieldExportGroup("/Game/Weapons/FORT_Melee/Blueprints/B_Athena_Pickaxe_Generic.B_Athena_Pickaxe_Generic_C", minimalParseMode: ParseMode.Debug)]
+[NetFieldExportGroup("/Game/Weapons/FORT_Melee/Blueprints/B_Athena_Pickaxe_Generic.B_Athena_Pickaxe_Generic_C", minimalParseMode: ParseMode.Full)]
 public class Pickaxe : BaseWeapon
 {
 }
 
-[NetFieldExportGroup("/Game/Weapons/FORT_Melee/Blueprints/B_Athena_Pickaxe_DualWield_Generic.B_Athena_Pickaxe_DualWield_Generic_C", minimalParseMode: ParseMode.Debug)]
+[NetFieldExportGroup("/Game/Weapons/FORT_Melee/Blueprints/B_Athena_Pickaxe_DualWield_Generic.B_Athena_Pickaxe_DualWield_Generic_C", minimalParseMode: ParseMode.Full)]
 public class DualWieldPickaxe : BaseWeapon
 {
 }

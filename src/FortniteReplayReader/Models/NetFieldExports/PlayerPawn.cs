@@ -20,6 +20,11 @@ public class PlayerPawnCache
 
     [NetFieldExportRPC("NetMulticast_InvokeGameplayCueAdded_WithParams", "/Script/FortniteGame.FortPawn:NetMulticast_InvokeGameplayCueAdded_WithParams", isFunction: true)]
     public GameplayCue InvokeGameplayCueAdded { get; set; }
+
+
+    [NetFieldExportRPC("", "", isFunction: true)]
+    public object AnyRpc { get; set; }
+
 }
 
 [NetFieldExportGroup("/Game/Athena/PlayerPawn_Athena.PlayerPawn_Athena_C", minimalParseMode: ParseMode.Minimal)]

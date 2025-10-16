@@ -16,13 +16,13 @@ public class FortInventoryCache
 public class FortInventory : INetFieldExportGroup
 {
     [NetFieldExport("RemoteRole", RepLayoutCmdType.Ignore)]
-    public uint? RemoteRole { get; set; }
+    public object RemoteRole { get; set; }
 
-    [NetFieldExport("Owner", RepLayoutCmdType.PropertyObject)]
-    public uint? Owner { get; set; }
+    [NetFieldExport("Owner", RepLayoutCmdType.Ignore)]
+    public object Owner { get; set; }
 
     [NetFieldExport("Role", RepLayoutCmdType.Ignore)]
-    public uint? Role { get; set; }
+    public object Role { get; set; }
 
     [NetFieldExport("Count", RepLayoutCmdType.PropertyInt)]
     public int? Count { get; set; }
@@ -70,7 +70,7 @@ public class FortInventory : INetFieldExportGroup
     public bool? bUpdateStatsOnCollection { get; set; }
 
     [NetFieldExport("StateValues", RepLayoutCmdType.DynamicArray)]
-    public FortItemEntryStateValue[] StateValues { get; set; }
+    public object StateValues { get; set; }
 
     [NetFieldExport("ParentInventory", RepLayoutCmdType.PropertyObject)]
     public uint? ParentInventory { get; set; }
@@ -82,11 +82,30 @@ public class FortInventory : INetFieldExportGroup
     public uint? WrapOverride { get; set; }
 
     [NetFieldExport("AlterationInstances", RepLayoutCmdType.Ignore)]
-    public DebuggingObject[] AlterationInstances { get; set; }
+    public object AlterationInstances { get; set; }
 
     [NetFieldExport("GenericAttributeValues", RepLayoutCmdType.Ignore)]
-    public DebuggingObject[] GenericAttributeValues { get; set; }
+    public object GenericAttributeValues { get; set; }
 
     [NetFieldExport("ReplayPawn", RepLayoutCmdType.PropertyObject)]
     public uint? ReplayPawn { get; set; }
+
+    [NetFieldExport("DataList", RepLayoutCmdType.Ignore)]
+    public object DataList { get; set; }
+
+    [NetFieldExport("RemovedDataTypes", RepLayoutCmdType.DynamicArray)]
+    public uint[] RemovedDataTypes { get; set; }
+
+    [NetFieldExport("SlotNumber", RepLayoutCmdType.PropertyInt)]
+    public int? SlotNumber { get; set; }
+
+    [NetFieldExport("ParentObject", RepLayoutCmdType.PropertyObject)]
+    public uint? ParentObject { get; set; }
+}
+
+public class FortItemEntry
+{
+    public string ItemType { get; set; }
+    public int Count { get; set; }
+    public ItemDefinition Definition { get; set; }
 }

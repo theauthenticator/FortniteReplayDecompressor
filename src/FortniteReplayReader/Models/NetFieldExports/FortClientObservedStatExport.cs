@@ -1,11 +1,15 @@
-﻿using Unreal.Core.Attributes;
+using Unreal.Core.Attributes;
 using Unreal.Core.Contracts;
 using Unreal.Core.Models.Enums;
 
 namespace FortniteReplayReader.Models.NetFieldExports;
 
-[NetFieldExportGroup("/Script/FortniteGame.FortClientObservedStat", minimalParseMode: ParseMode.Full)]
-public class FortClientObservedStat : INetFieldExportGroup
+
+
+
+
+[NetFieldExportGroup("/Script/FortniteGame.FortClientObservedStatExport", minimalParseMode: ParseMode.Full)]
+public class FortClientObservedStatExport : INetFieldExportGroup
 {
     [NetFieldExport("StatName", RepLayoutCmdType.PropertyName)]
     public string StatName { get; set; }

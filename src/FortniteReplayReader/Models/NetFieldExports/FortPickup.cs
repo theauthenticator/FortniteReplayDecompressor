@@ -130,4 +130,7 @@ public class FortPickup : INetFieldExportGroup
 
     [NetFieldExport("OrderIndex", RepLayoutCmdType.PropertyUInt16)]
     public ushort? OrderIndex { get; set; }
+
+    [NetFieldExport("DataList", RepLayoutCmdType.DynamicArray)]
+public object[] DataList { get; set; }
 }
