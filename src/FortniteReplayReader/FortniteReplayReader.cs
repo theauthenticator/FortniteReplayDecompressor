@@ -24,6 +24,7 @@ using Unreal.Core.Contracts;
 using Unreal.Core.Exceptions;
 using Unreal.Core.Models;
 using Unreal.Core.Models.Enums;
+using FortniteReplayReader.Models.Eliminations;
 using Unreal.Encryption;
 using System.Collections;
 using FortniteReplayReader.Models.NetFieldExports.Buildings;
@@ -36,6 +37,18 @@ namespace FortniteReplayReader;
 public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 {
 
+
+    private class UnresolvedHarvestHit
+    {
+        public uint OwnerActorGuid { get; set; }
+        public uint ChannelIndex { get; set; }
+        public string MaterialType { get; set; }
+        public string ObjectPath { get; set; }
+        public float GameTime { get; set; }
+    }
+
+    private List<UnresolvedHarvestHit> unresolvedHarvestHits = new List<UnresolvedHarvestHit>();
+
     // Harvest hit tracking - add this with your other private fields
     private class HarvestHit
     {
@@ -47,6 +60,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private Queue<HarvestHit> recentHarvestHits = new Queue<HarvestHit>();
 
+
+
     private bool _verboseLogging = false; // Set to false to suppress most logs
 
 
@@ -57,8 +72,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             Console.WriteLine(message);
         }
     }
+    private uint mostRecentActiveChannel = 0;
 
 
+    private Dictionary<uint, float> lastChannelActivityTime = new Dictionary<uint, float>();
+
+
+    private Dictionary<uint, PlayerInfo> pawnToPlayerState = new Dictionary<uint, PlayerInfo>();
 
     private Dictionary<uint, FortBroadcastRemoteClientInfo> lastBroadcastInfo = new();
 
@@ -79,6 +99,17 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     private Dictionary<string, string> playerNames = new Dictionary<string, string>();
     private FortniteReplayBuilder Builder;
 
+    private HashSet<string> processedEliminationIds = new HashSet<string>();
+
+    private StreamWriter elimLogWriter;
+    private string elimLogPath = "elimination_debug.log";
+
+    private ElimTracker ElimTracker = new ElimTracker();
+
+    // CORRECT - at class level with explicit types
+    private Dictionary<string, string> activeKnocks = new Dictionary<string, string>();
+    private Dictionary<string, int> eliminationCounts = new Dictionary<string, int>();
+
     private Dictionary<short, string> persistentIdToPlayerId = new(); // WorldPlayerId -> Internal PlayerId
     private Dictionary<string, string> playerIdToEpicId = new(); // Internal PlayerId -> Epic Account ID
 
@@ -88,6 +119,9 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     private Dictionary<string, List<uint>> exportTypeToChannels = new Dictionary<string, List<uint>>();
     private Dictionary<uint, uint> channelToActorGuid = new Dictionary<uint, uint>();
     private Dictionary<uint, List<string>> channelExportHistory = new Dictionary<uint, List<string>>();
+
+    private Dictionary<string, HashSet<string>> eliminationPropertiesFound = new Dictionary<string, HashSet<string>>();
+    private List<Dictionary<string, object>> eliminationSamples = new List<Dictionary<string, object>>();
 
     private Dictionary<string, HashSet<string>> statPropertiesByType = new Dictionary<string, HashSet<string>>();
 
@@ -131,6 +165,55 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             return actorName.Substring(0, uaidIndex);
         }
         return actorName;
+    }
+
+    private uint GetPlayerEliminations(string playerId)
+    {
+        if (string.IsNullOrEmpty(playerId))
+            return 0;
+
+        try
+        {
+            var playerData = Builder.GetAllPlayers()
+                .FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+
+            return playerData?.Kills ?? 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private string GetPlayerName(string playerId)
+    {
+        if (string.IsNullOrEmpty(playerId))
+            return "Unknown";
+
+        // Method 1: Look up in Builder's player data (most reliable)
+        try
+        {
+            var playerData = Builder.GetAllPlayers()
+                .FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+
+            if (playerData != null && !string.IsNullOrEmpty(playerData.PlayerName))
+            {
+                return playerData.PlayerName;
+            }
+        }
+        catch { }
+
+        // Method 2: Try playerNames dictionary (if manually populated)
+        if (playerNames.TryGetValue(playerId, out var name))
+        {
+            return name;
+        }
+
+
+        // Fallback: Return shortened ID
+        return playerId.Length > 8
+            ? playerId.Substring(0, 8) + "..."
+            : playerId;
     }
 
     private void TrackUnknownHarvestable(string actorName, string archetypePath, string playerId, float gameTime)
@@ -204,12 +287,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         if (unknownHarvestables.Count == 0)
         {
-            Console.WriteLine("\n✅ All harvestables in this replay are known!");
+            LogVerbose("\n✅ All harvestables in this replay are known!");
             return;
         }
 
-        Console.WriteLine("\n=== UNKNOWN HARVESTABLES REPORT ===");
-        Console.WriteLine($"Found {unknownHarvestables.Count} unknown harvestable types\n");
+        LogVerbose("\n=== UNKNOWN HARVESTABLES REPORT ===");
+        LogVerbose($"Found {unknownHarvestables.Count} unknown harvestable types\n");
 
         var sorted = unknownHarvestables.Values
             .OrderByDescending(x => x.HitCount)
@@ -218,27 +301,27 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var report = new List<string>();
         report.Add("BlueprintClass,HitCount,UniquePlayersHit,EstimatedMaterialType,ArchetypePath,FirstHitTime,LastHitTime");
 
-        Console.WriteLine("Top Unknown Harvestables:");
-        Console.WriteLine("─────────────────────────────────────────────────────────");
+        LogVerbose("Top Unknown Harvestables:");
+        LogVerbose("─────────────────────────────────────────────────────────");
 
         foreach (var unknown in sorted.Take(20))
         {
             var firstHit = unknown.HitTimestamps.Min();
             var lastHit = unknown.HitTimestamps.Max();
 
-            Console.WriteLine($"\n{unknown.BlueprintClass}");
-            Console.WriteLine($"  Hit Count: {unknown.HitCount}");
-            Console.WriteLine($"  Unique Players: {unknown.HitByPlayers.Count}");
-            Console.WriteLine($"  Estimated Type: {unknown.EstimatedMaterialType}");
-            Console.WriteLine($"  First Hit: {firstHit:F1}s, Last Hit: {lastHit:F1}s");
+            LogVerbose($"\n{unknown.BlueprintClass}");
+            LogVerbose($"  Hit Count: {unknown.HitCount}");
+            LogVerbose($"  Unique Players: {unknown.HitByPlayers.Count}");
+            LogVerbose($"  Estimated Type: {unknown.EstimatedMaterialType}");
+            LogVerbose($"  First Hit: {firstHit:F1}s, Last Hit: {lastHit:F1}s");
 
             report.Add($"\"{unknown.BlueprintClass}\",{unknown.HitCount},{unknown.HitByPlayers.Count},\"{unknown.EstimatedMaterialType}\",\"{unknown.ArchetypePath}\",{firstHit:F1},{lastHit:F1}");
         }
 
         File.WriteAllLines(outputPath, report);
-        Console.WriteLine($"\n✅ Unknown harvestables exported to: {outputPath}");
-        Console.WriteLine($"   Total unknown types: {unknownHarvestables.Count}");
-        Console.WriteLine($"   Total hits on unknowns: {unknownHarvestables.Values.Sum(x => x.HitCount)}");
+        LogVerbose($"\n✅ Unknown harvestables exported to: {outputPath}");
+        LogVerbose($"   Total unknown types: {unknownHarvestables.Count}");
+        LogVerbose($"   Total hits on unknowns: {unknownHarvestables.Values.Sum(x => x.HitCount)}");
     }
 
 
@@ -246,46 +329,337 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         epicAccessToken = accessToken;
     }
-
-    private async Task<string> GetDisplayNameFromEpicAPI(string accountId)
-    {
-        if (string.IsNullOrEmpty(epicAccessToken))
+    /*
+        public void ProcessEliminationsFromKillFeed()
         {
-            return "Unknown";
-        }
+            Console.WriteLine($"\n{new string('=', 80)}");
+            Console.WriteLine($"PROCESSING ELIMINATIONS FROM KILLFEED");
+            Console.WriteLine($"{new string('=', 80)}\n");
 
-        try
-        {
-            // Convert to lowercase for Epic API
-            var lowercaseAccountId = accountId.ToLower();
-            var url = $"https://account-public-service-prod.ol.epicgames.com/account/api/public/account/{lowercaseAccountId}";
-            var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.Add("Authorization", $"Bearer {epicAccessToken}");
+            var rawKillFeed = Builder.GetKillFeed();
+            Console.WriteLine($"Total KillFeed entries (raw): {rawKillFeed.Count}");
 
-            var response = await httpClient.SendAsync(request);
-
-            if (response.IsSuccessStatusCode)
-            {
-                var json = await response.Content.ReadAsStringAsync();
-                var accountData = JsonSerializer.Deserialize<JsonElement>(json);
-
-                if (accountData.TryGetProperty("displayName", out var displayNameElement))
+            var killFeed = rawKillFeed
+                .GroupBy(e => new
                 {
-                    return displayNameElement.GetString() ?? accountId;
+                    Victim = e.PlayerName,
+                    Attacker = GetPlayerIdFromActor(e.FinisherOrDownerActorId),
+                    Timestamp = e.ReplicatedWorldTimeSecondsDouble,
+                    IsDowned = e.IsDowned
+                })
+                .Select(g => g.Last())
+                .OrderBy(e => e.ReplicatedWorldTimeSecondsDouble)
+                .ToList();
+
+            Console.WriteLine($"Total KillFeed entries (after dedup): {killFeed.Count}");
+            Console.WriteLine($"Duplicates removed: {rawKillFeed.Count - killFeed.Count}\n");
+
+            // Build elimination timeline for helper functions
+            var eliminationTimeline = killFeed
+                .Where(e => !e.IsDowned)
+                .Select(e => (
+                    victimId: e.PlayerName,
+                    attackerId: GetPlayerIdFromActor(e.FinisherOrDownerActorId),
+                    timestamp: e.ReplicatedWorldTimeSecondsDouble ?? 0.0
+                ))
+                .OrderBy(e => e.timestamp)
+                .ToList();
+
+            // Sequential state tracking
+            var mostRecentKnocker = new Dictionary<string, (string knockerId, double timestamp)>(StringComparer.OrdinalIgnoreCase);
+            var playerEliminated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var processedEntries = new HashSet<string>();
+            var eliminationCounts = new Dictionary<string, int>();
+            var skipped = 0;
+
+            foreach (var entry in killFeed)
+            {
+                var entryId = $"{entry.ReplicatedWorldTimeSecondsDouble}_{entry.PlayerName}_{entry.IsDowned}";
+                if (!processedEntries.Add(entryId))
+                    continue;
+
+                var victimId = entry.PlayerName;
+                var attackerId = GetPlayerIdFromActor(entry.FinisherOrDownerActorId);
+                var timestamp = entry.ReplicatedWorldTimeSecondsDouble ?? 0.0;
+
+                // KNOCK EVENT
+                if (entry.IsDowned)
+                {
+                    if (attackerId == "Unknown" || victimId.Equals(attackerId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    // Check if victim already has a prior knock
+                    if (mostRecentKnocker.ContainsKey(victimId))
+                    {
+                        var prevKnocker = mostRecentKnocker[victimId];
+
+                        // If victim was eliminated between knocks, they rebooted
+                        if (playerEliminated.Contains(victimId))
+                        {
+                            Console.WriteLine($"🔄 REBOOT: {GetPlayerName(victimId)} rebooted, new knock chain");
+                            playerEliminated.Remove(victimId);
+                        }
+                        else
+                        {
+                            // REVIVE: Re-knocked without elimination
+                            Console.WriteLine($"🔄 REVIVE: {GetPlayerName(victimId)} revived, {GetPlayerName(prevKnocker.knockerId)}'s knock CLEARED");
+                        }
+                    }
+
+                    mostRecentKnocker[victimId] = (attackerId, timestamp);
+                    Console.WriteLine($"👊 KNOCK: {GetPlayerName(attackerId)} knocked {GetPlayerName(victimId)}");
+                }
+                // ELIMINATION EVENT
+                else
+                {
+                    if (attackerId == "Unknown" || victimId.Equals(attackerId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        skipped++;
+                        continue;
+                    }
+
+                    string creditPlayerId = null;
+                    Console.WriteLine($"\n⚰️ ELIMINATION: {GetPlayerName(victimId)}");
+
+                    // Check if this victim was directly knocked
+                    if (mostRecentKnocker.TryGetValue(victimId, out var recentKnock))
+                    {
+                        var knockerId = recentKnock.knockerId;
+                        Console.WriteLine($"   Prior knock: {GetPlayerName(knockerId)}");
+
+                        // Knocker gets credit if their team is alive
+                        if (IsPlayerOrTeammateAliveAtTimestamp(knockerId, eliminationTimeline, timestamp))
+                        {
+                            creditPlayerId = knockerId;
+                            Console.WriteLine($"   ✅ Knock credit: {GetPlayerName(knockerId)}'s team alive");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"   ❌ No credit: {GetPlayerName(knockerId)}'s team dead");
+                        }
+
+                        mostRecentKnocker.Remove(victimId);
+                    }
+                    // Check if a TEAMMATE was recently knocked (e.g., Pollo knocks A, finishes A's teammate B)
+                    else
+                    {
+                        var teammates = Builder.GetAllPlayers()
+                            .Where(p => IsOnSameTeam(victimId, p.PlayerId, null, timestamp))
+                            .Select(p => p.PlayerId)
+                            .ToList();
+
+
+                        Console.WriteLine($"   Checking teammates for {victimId}");
+                        Console.WriteLine($"   Found {teammates.Count} teammates: {string.Join(", ", teammates)}");
+
+                        var recentTeammateKnocks = teammates
+                            .Where(t => mostRecentKnocker.ContainsKey(t))
+                            .Select(t => (teammate: t, knock: mostRecentKnocker[t]))
+                            .Where(x => IsPlayerOrTeammateAliveAtTimestamp(x.knock.knockerId, eliminationTimeline, timestamp))
+                            .ToList();
+
+                        if (recentTeammateKnocks.Any())
+                        {
+                            // Most recent teammate knock gets the credit
+                            var knockerInfo = recentTeammateKnocks.Last();
+                            creditPlayerId = knockerInfo.knock.knockerId;
+                            Console.WriteLine($"   Teammate {GetPlayerName(knockerInfo.teammate)} was knocked by {GetPlayerName(creditPlayerId)}");
+                            Console.WriteLine($"   ✅ Knock credit: {GetPlayerName(creditPlayerId)} (via teammate knock)");
+
+                            // Clear the teammate's knock since it led to an elimination
+                            mostRecentKnocker.Remove(knockerInfo.teammate);
+                        }
+                        else
+                        {
+                            // Direct elimination
+                            creditPlayerId = attackerId;
+                            Console.WriteLine($"   ✅ Direct credit: {GetPlayerName(attackerId)}");
+                        }
+                    }
+
+                    // Award the elimination
+                    if (creditPlayerId != null && creditPlayerId != "Unknown")
+                    {
+                        if (!eliminationCounts.ContainsKey(creditPlayerId))
+                            eliminationCounts[creditPlayerId] = 0;
+
+                        eliminationCounts[creditPlayerId]++;
+                        ElimTracker.RecordElimination(creditPlayerId, victimId, timestamp, "elimination", null);
+                        Console.WriteLine($"   🎯 AWARDED to {GetPlayerName(creditPlayerId)}");
+                    }
+
+                    playerEliminated.Add(victimId);
                 }
             }
-            else
+
+            Console.WriteLine($"\n{new string('=', 80)}");
+            Console.WriteLine($"SUMMARY");
+            Console.WriteLine($"{new string('=', 80)}");
+            Console.WriteLine($"Total eliminations awarded: {eliminationCounts.Values.Sum()}");
+            Console.WriteLine($"Skipped: {skipped}");
+            Console.WriteLine($"\n🎯 FINAL COUNTS:");
+
+            foreach (var kvp in eliminationCounts.OrderByDescending(x => x.Value))
             {
-                LogVerbose($"API error for {accountId}: {response.StatusCode}");
+                Console.WriteLine($" {GetPlayerName(kvp.Key)}: {kvp.Value}");
             }
-        }
-        catch (Exception ex)
-        {
-            LogVerbose($"Error fetching display name for {accountId}: {ex.Message}");
+
+            Console.WriteLine($"\n{new string('=', 80)}\n");
+
+            ElimTracker.PrintSummary();
         }
 
-        return accountId; // Fallback to account ID
+        /// <summary>
+        /// Build a timeline of reboot events for validation
+        /// A reboot is when a player:
+        /// 1. Was fully eliminated (appears with IsRevived BUT NOT IsDowned)
+        /// 2. Is brought back via Reboot Van (RebootCounter increases)
+        /// </summary>
+        private Dictionary<string, List<double>> BuildRebootTimeline(List<KillFeedEntry> killFeed)
+        {
+            var rebootTimeline = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
+
+            // Track eliminations to verify reboots are after full eliminations
+            var eliminations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var entry in killFeed.OrderBy(e => e.ReplicatedWorldTimeSecondsDouble))
+            {
+                var playerId = entry.PlayerName;
+                var timestamp = entry.ReplicatedWorldTimeSecondsDouble ?? 0.0;
+
+                // Track full eliminations (not downed, not revived)
+                if (!entry.IsDowned && !entry.IsRevived)
+                {
+                    eliminations.Add(playerId);
+                }
+
+                // Detect reboot: IsRevived flag on a non-knock event (full elimination reversal)
+                // This happens when RebootCounter increases
+                if (entry.IsRevived && !entry.IsDowned)
+                {
+                    if (!rebootTimeline.ContainsKey(playerId))
+                    {
+                        rebootTimeline[playerId] = new List<double>();
+                    }
+
+                    rebootTimeline[playerId].Add(timestamp);
+                    eliminations.Remove(playerId); // They're back in the game
+                    Console.WriteLine($"🔄 REBOOT DETECTED: {GetPlayerName(playerId)} at {timestamp:F2}s (RebootCounter increased)");
+                }
+            }
+
+            return rebootTimeline;
+        }
+
+        private bool IsPlayerOrTeammateAliveAtTimestamp(string playerId, List<(string victimId, string attackerId, double timestamp)> eliminationTimeline, double checkTimestamp)
+        {
+            var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+            if (playerData == null) return false;
+
+            int? teamIndex = playerData.TeamIndex;
+            var teammates = Builder.GetAllPlayers().Where(p => p.TeamIndex == teamIndex).ToList();
+
+            foreach (var teammate in teammates)
+            {
+                // Get ALL eliminations for this teammate
+                var elimsForTeammate = eliminationTimeline
+                    .Where(e => e.victimId.Equals(teammate.PlayerId, StringComparison.OrdinalIgnoreCase))
+                    .OrderBy(e => e.timestamp)
+                    .ToList();
+
+                // Find the FINAL (last) elimination
+                var finalElim = elimsForTeammate.LastOrDefault();
+
+                // Teammate is alive if:
+                // 1. They were never eliminated, OR
+                // 2. Their final elimination is AFTER the check timestamp
+                if (finalElim.timestamp == 0 || finalElim.timestamp >= checkTimestamp)
+                {
+                    return true; // Team has at least one alive member
+                }
+            }
+
+            return false; // All teammates have final eliminations before checkTimestamp
+        }
+
+        private bool IsOnSameTeam(string playerId1, string playerId2, HashSet<string> eliminatedPlayers, double timestamp)
+        {
+            var team1 = GetPlayerTeamIndex(playerId1);
+            var team2 = GetPlayerTeamIndex(playerId2);
+            return team1 == team2 && team1 != -1;
+        }
+
+
+
+
+        private bool IsPlayerOrTeammateAlive(string playerId, HashSet<string> eliminatedPlayers, double currentTime)
+        {
+            Console.WriteLine($"      🔎 Checking team status for {GetPlayerName(playerId)} at {currentTime:F2}s");
+
+            // Get the player's team index from all players
+            var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+
+            if (playerData == null)
+            {
+                Console.WriteLine($"      ⚠️  Could not find PlayerData for {playerId}");
+                return false;
+            }
+
+            int? teamIndex = playerData.TeamIndex;
+            Console.WriteLine($"      Team Index: {teamIndex}");
+
+            // Get all teammates
+            var teammates = Builder.GetAllPlayers().Where(p => p.TeamIndex == teamIndex).ToList();
+            Console.WriteLine($"      Total teammates (including self): {teammates.Count}");
+
+            // Check if any teammate is still alive
+            int aliveCount = 0;
+            foreach (var teammate in teammates)
+            {
+                bool isAlive = !eliminatedPlayers.Contains(teammate.PlayerId);
+                Console.WriteLine($"        - {GetPlayerName(teammate.PlayerId)}: {(isAlive ? "ALIVE ✓" : "DEAD ✗")}");
+                if (isAlive) aliveCount++;
+            }
+
+            bool teamAlive = aliveCount > 0;
+            Console.WriteLine($"      Team status: {aliveCount} alive, Team is {(teamAlive ? "ALIVE" : "DEAD")}");
+
+            return teamAlive;
+        }
+
+        private string GetPlayerIdFromName(string playerName)
+        {
+            if (string.IsNullOrEmpty(playerName))
+                return null;
+
+            try
+            {
+                var playerData = Builder.GetAllPlayers()
+                    .FirstOrDefault(p => p.PlayerName != null &&
+                                       p.PlayerName.Equals(playerName, StringComparison.OrdinalIgnoreCase));
+
+                return playerData?.PlayerId;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+         */
+
+    private void LogElimination(string message)
+    {
+        try
+        {
+            elimLogWriter?.WriteLine(message);
+        }
+        catch { /* Ignore if can't write */ }
     }
+
 
     public ReplayReader(ILogger? logger = null, ParseMode parseMode = ParseMode.Debug) : base(logger, parseMode)
     {
@@ -296,6 +670,19 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var databasePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "FortniteHarvestables_v2.json");
         harvestableDatabase.Load(databasePath);
         harvestableDatabase.PrintStatistics();
+
+        try
+        {
+            elimLogWriter = new StreamWriter(elimLogPath, append: false) { AutoFlush = true };
+            elimLogWriter.WriteLine($"=== ELIMINATION DEBUG LOG ===");
+            elimLogWriter.WriteLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            elimLogWriter.WriteLine();
+        }
+        catch (Exception ex)
+        {
+            //Console.WriteLine($"Warning: Could not create elimination log: {ex.Message}");
+        }
+
 
         LogVerbose("=== SYSTEMATIC REPLAY STRUCTURE ANALYSIS ===");
         LogVerbose("Phase 1: Channel mapping and export type distribution");
@@ -311,29 +698,108 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         return ReadReplay(stream);
     }
 
+    private Dictionary<string, int> ExtractFinalAthenaKills()
+    {
+        var finalKills = new Dictionary<string, int>();
+
+        foreach (var player in playerRealtimeStats)
+        {
+            if (player.Value.ContainsKey("AthenaKills"))
+            {
+                if (int.TryParse(player.Value["AthenaKills"].ToString(), out int kills))
+                {
+                    finalKills[player.Key] = kills;
+                }
+            }
+        }
+
+        Console.WriteLine("\n=== FINAL ATHENAKILLS (from replay) ===");
+        foreach (var (playerId, kills) in finalKills.OrderByDescending(x => x.Value))
+        {
+            var playerName = GetPlayerNameFromReplay(playerId);
+            Console.WriteLine($"{playerName}: {kills}");
+        }
+
+        return finalKills;
+    }
+
+    private void ExtractAndPrintFinalAthenaKills()
+    {
+        Console.WriteLine($"\n=== ATHENAKILLS COVERAGE ANALYSIS ===");
+        Console.WriteLine($"Total players in replay: {playerRealtimeStats.Count}");
+
+        var withAthenaKills = playerRealtimeStats.Where(p => p.Value.ContainsKey("AthenaKills")).ToList();
+        var withoutAthenaKills = playerRealtimeStats.Where(p => !p.Value.ContainsKey("AthenaKills")).ToList();
+
+        Console.WriteLine($"Players WITH AthenaKills stat: {withAthenaKills.Count}");
+        Console.WriteLine($"Players WITHOUT AthenaKills stat: {withoutAthenaKills.Count}");
+
+        Console.WriteLine($"\nPlayers missing AthenaKills:");
+        foreach (var player in withoutAthenaKills.Take(20))
+        {
+            Console.WriteLine($"  - {GetPlayerNameFromReplay(player.Key)}");
+        }
+    }
     public FortniteReplay ReadReplay(Stream stream)
     {
         using var archive = new Unreal.Core.BinaryReader(stream);
 
         Builder = new FortniteReplayBuilder();
         DamageTracker = new DamageTracker();
-        ReadReplay(archive);
+
+        try
+        {
+            ReadReplay(archive);
+        }
+        catch (Exception ex)
+        {
+            LogVerbose($"CRASH during replay reading: {ex}");
+            LogVerbose($"Stack: {ex.StackTrace}");
+            throw;
+        }
 
         var replay = Builder.Build(Replay);
         replay.DamageSummary = DamageTracker.GetDamageSummary();
 
+        PostProcessHarvestHits();
+
+        Builder.UpdateKillFeedWithNames();
+        Builder.SetPlayerInfo(playerInfoByPlayerId);
+        PrintEliminationsSummary();
+        PrintEliminationsSummaryWithNames();
+
+        var elimCredits = EvaluateEliminationsFromEvents();
+        Builder.SetEliminationCredits(elimCredits);
+        //Builder.ProcessEliminationsFromKillFeed();
+        // Builder.GetFinalKillScores();
+        // Builder.PrintFinalKillScores();
+        // Builder.PrintFinalAthenaKills();
+
+
+        //ProcessEliminationsFromKillFeed();
+        //ValidateKillCounts();
+        // PrintEliminationPropertySummary();
         // Print comprehensive analysis
+        //ExtractFinalAthenaKills();
+        //ExtractAndPrintFinalAthenaKills();
         PrintStructuralAnalysis();
         PrintEventSummary();
+
         BuildTracker.PrintBuildSummary();
         BuildTracker.PrintSanityChecks();
+        HarvestTracker.PrintHarvestSummary();
 
+        //Builder.DebugPlayerEliminations("d6e651d508004eaeaf16dc434b0b41e7");
 
         var unknownHarvestablesPath = "unknown_harvestables.csv";
         ExportUnknownHarvestables(unknownHarvestablesPath);
 
         return replay;
     }
+
+
+    private List<(string eliminatedId, string eliminatorId, double time, bool knocked)> _parsedEliminations = new();
+
 
     private string _branch;
     public int Major { get; set; }
@@ -354,6 +820,396 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         }
     }
 
+    public void PrintEliminationsSummary()
+    {
+        Console.WriteLine($"\n≡ƒôê ELIMINATION EVENTS SUMMARY:");
+        Console.WriteLine($"   Total eliminations parsed: {_parsedEliminations.Count}\n");
+
+        for (int i = 0; i < _parsedEliminations.Count; i++)
+        {
+            var (eliminated, eliminator, time, knocked) = _parsedEliminations[i];
+            string action = knocked ? "KNOCK" : "ELIM";
+            Console.WriteLine($"   [{i + 1}] {action} @ {time:F2}s: {eliminated} by {eliminator}");
+        }
+
+        Console.WriteLine($"\n   ✅ Summary complete\n");
+    }
+
+    public void PrintEliminationsSummaryWithNames()
+    {
+        Console.WriteLine($"\n≡ƒôê ELIMINATION EVENTS SUMMARY:");
+        Console.WriteLine($"   Total eliminations parsed: {_parsedEliminations.Count}\n");
+
+        for (int i = 0; i < _parsedEliminations.Count; i++)
+        {
+            var (eliminatedId, eliminatorId, time, knocked) = _parsedEliminations[i];
+            string action = knocked ? "KNOCK" : "ELIM";
+
+            // Map IDs to display names
+            var eliminatedName = GetPlayerNameFromReplay(eliminatedId) ?? eliminatedId;
+            var eliminatorName = GetPlayerNameFromReplay(eliminatorId) ?? eliminatorId;
+
+            Console.WriteLine($"   [{i + 1}] {action} @ {time:F2}s: {eliminatedName} by {eliminatorName}");
+        }
+
+        Console.WriteLine($"\n   ✅ Summary complete\n");
+    }
+
+    private Dictionary<string, List<double>> GetPlayerReboots()
+    {
+        var playerReboots = new Dictionary<string, List<double>>();
+
+        var playerStateHistory = Builder.GetPlayerStateHistory();
+
+        foreach (var (playerId, history) in playerStateHistory)
+        {
+            playerReboots[playerId] = new List<double>();
+            var sortedHistory = history.OrderBy(h => h.timestamp).ToList();
+
+            bool lastChipState = true;
+
+            foreach (var (timestamp, property, value) in sortedHistory)
+            {
+                if (property == "bResurrectionChipAvailable" && value is bool chipValue)
+                {
+                    // Chip goes from true -> false = reboot used
+                    if (lastChipState && !chipValue)
+                    {
+                        playerReboots[playerId].Add(timestamp);
+                    }
+                    lastChipState = chipValue;
+                }
+            }
+        }
+
+        return playerReboots;
+    }
+
+
+    /// <summary>
+    /// Evaluate eliminations based on authoritative elimination events
+    /// Track who knocked whom, credit knockers if their teammate is alive at elimination time
+    /// </summary>
+    public Dictionary<string, int> EvaluateEliminationsFromEvents()
+    {
+        Console.WriteLine($"\n≡ƒôì EVALUATING ELIMINATIONS FROM EVENTS (COMPLETE LOGIC):");
+        Console.WriteLine($"   Total eliminations to process: {_parsedEliminations.Count}\n");
+
+        var mostRecentKnocker = new Dictionary<string, (string knockerId, double knockTime)>();
+        var playerEliminatedTime = new Dictionary<string, double>();
+        var playerRevives = GetPlayerRevivesAndReboots();
+        var playerTeams = BuildPlayerTeamMap();
+        var playerReboots = GetValidatedReboots();  // NEW: Use validated reboots from state history
+        var eliminationCredits = new Dictionary<string, int>();
+
+        int creditedCount = 0;
+        int noKnockerCount = 0;
+        int teamDeadCount = 0;
+        int revivedCount = 0;
+        int noKnockerCreditedCount = 0;
+
+        int processedCount = 0;
+
+        foreach (var (eliminatedId, eliminatorId, time, knocked) in _parsedEliminations)
+        {
+            processedCount++;
+
+            if (knocked)
+            {
+                mostRecentKnocker[eliminatedId] = (eliminatorId, time);
+                Console.WriteLine($"   [{processedCount}] KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
+            }
+            else
+            {
+                Console.WriteLine($"   [{processedCount}] ELIM @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
+
+                playerEliminatedTime[eliminatedId] = time;
+
+                if (mostRecentKnocker.ContainsKey(eliminatedId))
+                {
+                    var (knockerId, knockTime) = mostRecentKnocker[eliminatedId];
+                    var knockerName = GetPlayerNameFromReplay(knockerId);
+                    var knockerTeam = playerTeams.ContainsKey(knockerId) ? playerTeams[knockerId] : -1;
+
+                    Console.WriteLine($"      → Knocker: {knockerName} (Team {knockerTeam}) @ {knockTime:F2}s");
+
+                    // Check if victim was revived between knock and elimination
+                    bool wasRevived = playerRevives.ContainsKey(eliminatedId) &&
+                        playerRevives[eliminatedId].Any(reviveTime => reviveTime > knockTime && reviveTime < time);
+
+                    if (wasRevived)
+                    {
+                        Console.WriteLine($"      ❌ REVIVED between knock ({knockTime:F2}s) and elim ({time:F2}s)");
+                        revivedCount++;
+                        mostRecentKnocker.Remove(eliminatedId);
+                    }
+                    else
+                    {
+                        // Check if knocker's team is alive at elimination time
+                        bool teamAlive = IsTeammateAliveAtTime(knockerTeam, time, playerTeams, playerEliminatedTime, playerRevives);
+
+                        // Check: if knocker was DEAD before the elimination AND rebooted AFTER, don't credit
+                        bool knockerWasDeadBeforeElim = playerEliminatedTime.ContainsKey(knockerId) &&
+                                                        playerEliminatedTime[knockerId] < time;
+                        bool knockerRebooted = playerReboots.ContainsKey(knockerId) &&
+                            playerReboots[knockerId].Any(rebootTime => rebootTime > time);
+
+                        if (knockerWasDeadBeforeElim && knockerRebooted)
+                        {
+                            Console.WriteLine($"      ❌ NO CREDIT - Knocker was dead and rebooted AFTER elimination");
+                            teamDeadCount++;
+                        }
+                        else if (knockerTeam >= 0 && teamAlive)
+                        {
+                            Console.WriteLine($"      ✅ CREDIT awarded to {knockerName} (team alive)");
+                            creditedCount++;
+
+                            if (!eliminationCredits.ContainsKey(knockerId))
+                                eliminationCredits[knockerId] = 0;
+                            eliminationCredits[knockerId]++;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"      ❌ NO CREDIT - Knocker's team dead at {time:F2}s");
+                            teamDeadCount++;
+                        }
+
+                        mostRecentKnocker.Remove(eliminatedId);
+                    }
+                }
+                else
+                {
+                    // NO KNOCKER ON RECORD - Check if eliminator's team is alive
+                    var eliminatorTeam = playerTeams.ContainsKey(eliminatorId) ? playerTeams[eliminatorId] : -1;
+                    bool eliminatorTeamAlive = IsTeammateAliveAtTime(eliminatorTeam, time, playerTeams, playerEliminatedTime, playerRevives);
+
+                    Console.WriteLine($"      → Eliminator: {GetPlayerNameFromReplay(eliminatorId)} (Team {eliminatorTeam})");
+
+                    if (eliminatorTeam >= 0 && eliminatorTeamAlive)
+                    {
+                        Console.WriteLine($"      ✅ CREDIT awarded to {GetPlayerNameFromReplay(eliminatorId)} (direct elim, team alive)");
+                        noKnockerCreditedCount++;
+
+                        if (!eliminationCredits.ContainsKey(eliminatorId))
+                            eliminationCredits[eliminatorId] = 0;
+                        eliminationCredits[eliminatorId]++;
+                    }
+                    else
+                    {
+                        Console.WriteLine($"      ❌ NO CREDIT - No knocker and eliminator's team dead");
+                        noKnockerCount++;
+                    }
+                }
+
+                Console.WriteLine();
+            }
+        }
+
+        Console.WriteLine($"\n📊 ELIMINATION BREAKDOWN:");
+        Console.WriteLine($"   Total eliminations: {_parsedEliminations.Count / 2}");
+        Console.WriteLine($"   Credited (knocker): {creditedCount}");
+        Console.WriteLine($"   Credited (direct elim): {noKnockerCreditedCount}");
+        Console.WriteLine($"   Total credited: {creditedCount + noKnockerCreditedCount}");
+        Console.WriteLine($"   ---");
+        Console.WriteLine($"   No knocker (no credit): {noKnockerCount}");
+        Console.WriteLine($"   Team dead at elim: {teamDeadCount}");
+        Console.WriteLine($"   Revived between knock and elim: {revivedCount}");
+        Console.WriteLine();
+
+        PrintFinalCredits(eliminationCredits);
+
+        return eliminationCredits;
+    }
+
+
+    private Dictionary<string, List<double>> GetValidatedReboots()
+    {
+        var playerReboots = new Dictionary<string, List<double>>();
+
+        var playerStateHistory = Builder.GetPlayerStateHistory();
+
+        foreach (var (playerId, history) in playerStateHistory)
+        {
+            playerReboots[playerId] = new List<double>();
+            var sortedHistory = history.OrderBy(h => h.timestamp).ToList();
+
+            bool lastChipState = true;
+            bool wasJustFinished = false;
+
+            foreach (var (timestamp, property, value) in sortedHistory)
+            {
+                // Track when player is finished (eliminated)
+                if (property == "bDBNO" && value is bool bdbno)
+                {
+                    if (bdbno == false)
+                    {
+                        var deathCauseEntry = sortedHistory
+                            .Where(h => h.timestamp == timestamp && h.property == "DeathCause")
+                            .FirstOrDefault();
+                        int deathCause = deathCauseEntry.value is int ? (int) deathCauseEntry.value : 50;
+
+                        if (deathCause != 50) // Not a revive
+                            wasJustFinished = true;
+                    }
+                }
+
+                // Track chip usage for reboot
+                if (property == "bResurrectionChipAvailable" && value is bool chipValue)
+                {
+                    if (wasJustFinished && lastChipState && !chipValue)
+                    {
+                        playerReboots[playerId].Add(timestamp);
+                    }
+                    lastChipState = chipValue;
+                }
+            }
+        }
+
+        return playerReboots;
+    }
+
+    /// <summary>
+    /// Check if any teammate of knocker is alive at elimination time
+    /// </summary>
+    private bool IsTeammateAliveAtTime(int teamIndex, double elimTime,
+    Dictionary<string, int> playerTeams,
+    Dictionary<string, double> playerEliminatedTime,
+    Dictionary<string, List<double>> playerRevives)
+    {
+        if (teamIndex < 0) return false;
+
+        // Find all players on this team
+        var teammates = playerTeams.Where(p => p.Value == teamIndex).Select(p => p.Key).ToList();
+
+        foreach (var teammate in teammates)
+        {
+            bool alive = true;
+
+            // If teammate has been eliminated, check if it was after elimTime
+            if (playerEliminatedTime.ContainsKey(teammate))
+            {
+                double elimmedTime = playerEliminatedTime[teammate];
+                if (elimmedTime <= elimTime)
+                {
+                    // Teammate was eliminated BEFORE or AT the same time - not alive
+                    // UNLESS they were revived after elimination
+                    bool revived = playerRevives.ContainsKey(teammate) &&
+                        playerRevives[teammate].Any(reviveTime => reviveTime > elimmedTime && reviveTime < elimTime);
+
+                    alive = revived;
+                }
+            }
+
+            if (alive) return true;  // At least one teammate alive
+        }
+
+        return false;  // No teammates alive
+    }
+    /// <summary>
+    /// Build map of player -> team index
+    /// </summary>
+    private Dictionary<string, int> BuildPlayerTeamMap()
+    {
+        var playerTeams = new Dictionary<string, int>();
+
+        // Get players from the replay
+        var allPlayers = Builder.GetPlayers();
+
+        Console.WriteLine($"\n🔍 DEBUG: Building player team map");
+        Console.WriteLine($"   Total players: {allPlayers.Count}");
+
+        foreach (var kvp in allPlayers)
+        {
+            var playerData = kvp.Value;
+
+            if (playerData.PlayerId != null && playerData.TeamIndex.HasValue)
+            {
+                playerTeams[playerData.PlayerId] = playerData.TeamIndex.Value;
+                Console.WriteLine($"   {GetPlayerNameFromReplay(playerData.PlayerId)}: Team {playerData.TeamIndex}");
+            }
+        }
+
+        Console.WriteLine($"   Total players with teams: {playerTeams.Count}\n");
+        return playerTeams;
+    }
+
+    /// <summary>
+    /// Get revive and reboot times for each player
+    /// Returns: playerId -> List of revive times
+    /// </summary>
+    private Dictionary<string, List<double>> GetPlayerRevivesAndReboots()
+    {
+        var playerRevives = new Dictionary<string, List<double>>();
+
+        var playerStateHistory = Builder.GetPlayerStateHistory();
+
+        foreach (var (playerId, history) in playerStateHistory)
+        {
+            playerRevives[playerId] = new List<double>();
+            var sortedHistory = history.OrderBy(h => h.timestamp).ToList();
+
+            for (int i = 0; i < sortedHistory.Count; i++)
+            {
+                var (timestamp, property, value) = sortedHistory[i];
+
+                // Check for revive: bDBNO = false with DeathCause = 50 (Unspecified) means revived
+                if (property == "bDBNO" && value is bool bdbno && bdbno == false)
+                {
+                    var deathCauseEntry = sortedHistory
+                        .Where(h => h.timestamp == timestamp && h.property == "DeathCause")
+                        .FirstOrDefault();
+
+                    int deathCause = deathCauseEntry.value is int ? (int) deathCauseEntry.value : 50;
+
+                    if (deathCause == 50)  // Revive
+                    {
+                        playerRevives[playerId].Add(timestamp);
+                    }
+                }
+
+                // Check for reboot: bResurrectionChipAvailable goes from true to false
+                if (property == "bResurrectionChipAvailable" && value is bool chipValue && !chipValue)
+                {
+                    // Look for previous true value
+                    var prevChipState = sortedHistory
+                        .Where(h => h.timestamp < timestamp && h.property == "bResurrectionChipAvailable")
+                        .OrderByDescending(h => h.timestamp)
+                        .FirstOrDefault();
+
+                    if (prevChipState.property != null && prevChipState.value is bool prevChip && prevChip)
+                    {
+                        playerRevives[playerId].Add(timestamp);
+                    }
+                }
+            }
+        }
+
+        return playerRevives;
+    }
+
+    /// <summary>
+    /// Print final elimination credits
+    /// </summary>
+    private void PrintFinalCredits(Dictionary<string, int> eliminationCredits)
+    {
+        Console.WriteLine($"\n≡ƒôê FINAL ELIMINATION CREDITS:");
+        Console.WriteLine($"   Total credits awarded: {eliminationCredits.Values.Sum()}\n");
+
+        var sortedCredits = eliminationCredits
+            .OrderByDescending(k => k.Value)
+            .ThenBy(k => GetPlayerNameFromReplay(k.Key))
+            .ToList();
+
+        foreach (var (playerId, count) in sortedCredits)
+        {
+            var playerName = GetPlayerNameFromReplay(playerId);
+            Console.WriteLine($"   {playerName}: {count} eliminations");
+        }
+
+        Console.WriteLine();
+    }
+
+
 
     private void PrintUnknownExportsSummary()
     {
@@ -373,7 +1229,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             LogVerbose($"  - {exportType}");
         }
     }
-
     protected override void OnChannelOpened(uint channelIndex, NetworkGUID? actorGuid)
     {
         base.OnChannelOpened(channelIndex, actorGuid);
@@ -381,27 +1236,143 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         if (actorGuid != null && Channels[channelIndex]?.Actor != null)
         {
             var actor = Channels[channelIndex].Actor;
+            var actorGuidValue = actorGuid.Value;
 
             if (actor.Archetype != null)
             {
-                // Only ONE .Value - they're already uint!
-                var actorGuidValue = actorGuid.Value;  // NetworkGUID? -> uint (not NetworkGUID!)
-                var archetypeGuidValue = actor.Archetype.Value;  // NetworkGUID? -> uint
-
+                var archetypeGuidValue = actor.Archetype.Value;
                 actorGuidToArchetypeGuid[actorGuidValue] = archetypeGuidValue;
 
-                if (_netGuidCache.TryGetPathName(archetypeGuidValue, out var archetypePath))
+                string archetypePath;
+                if (_netGuidCache.TryGetPathName(archetypeGuidValue, out var path))
                 {
-                    archetypeGuidToPath[archetypeGuidValue] = archetypePath;
-                    Console.WriteLine($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
+                    archetypeGuidToPath[archetypeGuidValue] = path;
+                    archetypePath = path;
                 }
                 else
                 {
-                    Console.WriteLine($"🌲 Actor spawned: ActorGUID={actorGuidValue}, ArchetypeGUID={archetypeGuidValue} (path pending)");
+                    archetypePath = $"ArchetypeGUID={archetypeGuidValue} (path pending)";
+                }
+
+                LogVerbose($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
+
+                // ✅ ALWAYS tell the builder about this channel-actor mapping
+                Builder.AddActorChannel(channelIndex, actorGuidValue);
+                LogVerbose($"    ↳ Builder notified: Channel {channelIndex} ↔ Actor {actorGuidValue}");
+
+                // Track FortPlayerStateAthena
+                if (archetypePath.Contains("FortPlayerStateAthena"))
+                {
+                    if (!actorGuidToPlayerId.ContainsKey(actorGuidValue))
+                    {
+                        var newPlayerId = Guid.NewGuid().ToString();
+                        actorGuidToPlayerId[actorGuidValue] = newPlayerId;
+                        playerInfoByPlayerId[newPlayerId] = new PlayerInfo(
+                            newPlayerId,
+                            channelIndex,
+                            actorGuidValue,
+                            newPlayerId,
+                            actorGuidValue
+                        );
+
+                        // ✅ Map this channel to the player
+                        channelToPlayerId[channelIndex] = newPlayerId;
+
+                        LogVerbose($"    ↳ Registered PlayerState {actorGuidValue} → player {newPlayerId} on channel {channelIndex}");
+                    }
+                }
+
+                // Track FortPawnAthena
+                if (archetypePath.Contains("FortPawnAthena") || archetypePath.Contains("PlayerPawn"))
+                {
+                    channelToActorGuid[channelIndex] = actorGuidValue;
+
+                    // ✅ Try to map pawn channel to player immediately
+                    if (actorGuidToPlayerId.TryGetValue(actorGuidValue, out var playerId))
+                    {
+                        channelToPlayerId[channelIndex] = playerId;
+                        LogVerbose($"    ↳ Mapped pawn channel {channelIndex} → player {playerId}");
+                    }
+                    else
+                    {
+                        LogVerbose($"    ↳ Tracked pawn channel {channelIndex} → ActorGUID {actorGuidValue} (player TBD)");
+                    }
                 }
             }
         }
     }
+
+
+    private string? ResolvePlayerFromPawn(uint pawnActorGuid)
+    {
+        // Method 1: Direct mapping (if we already mapped this pawn)
+        if (actorGuidToPlayerId.TryGetValue(pawnActorGuid, out var directPlayerId))
+        {
+            LogVerbose($"    ✓ Method 1: Direct mapping found");
+            return directPlayerId;
+        }
+
+        // Method 2: Check pawnToPlayerState mapping
+        if (pawnToPlayerState.TryGetValue(pawnActorGuid, out var playerInfo))
+        {
+            LogVerbose($"    ✓ Method 2: Pawn→PlayerState mapping found");
+            return playerInfo?.PlayerId;
+        }
+
+        // Method 3: Try nearby actor GUIDs (±10 range)
+        // This handles cases where the pawn GUID is close to the player state GUID
+        for (int offset = 1; offset <= 10; offset++)
+        {
+            // Try higher
+            if (actorGuidToPlayerId.TryGetValue(pawnActorGuid + (uint) offset, out var higherPlayerId))
+            {
+                LogVerbose($"    ✓ Method 3: Found nearby actor +{offset} ({pawnActorGuid + offset})");
+                // Cache this mapping for future use
+                actorGuidToPlayerId[pawnActorGuid] = higherPlayerId;
+                return higherPlayerId;
+            }
+
+            // Try lower
+            if (pawnActorGuid >= offset &&
+                actorGuidToPlayerId.TryGetValue(pawnActorGuid - (uint) offset, out var lowerPlayerId))
+            {
+                LogVerbose($"    ✓ Method 3: Found nearby actor -{offset} ({pawnActorGuid - offset})");
+                // Cache this mapping for future use
+                actorGuidToPlayerId[pawnActorGuid] = lowerPlayerId;
+                return lowerPlayerId;
+            }
+        }
+
+        // Method 4: Check if this actor GUID has an archetype that's a pawn
+        if (actorGuidToArchetypeGuid.TryGetValue(pawnActorGuid, out var archetypeGuid))
+        {
+            if (archetypeGuidToPath.TryGetValue(archetypeGuid, out var archetypePath))
+            {
+                if (archetypePath.Contains("Pawn"))
+                {
+                    LogVerbose($"    ℹ️ Method 4: Confirmed this is a pawn archetype: {archetypePath}");
+                    // Try to find the owning player state by looking at recent player states
+                    var recentPlayer = playerInfoByPlayerId.Values
+                        .OrderByDescending(p => p.ActorGuid)
+                        .FirstOrDefault(p => p.ActorGuid < pawnActorGuid);
+
+                    if (recentPlayer != null)
+                    {
+                        LogVerbose($"    ✓ Method 4: Using most recent player state {recentPlayer.ActorGuid} → {recentPlayer.PlayerId}");
+                        actorGuidToPlayerId[pawnActorGuid] = recentPlayer.PlayerId;
+                        return recentPlayer.PlayerId;
+                    }
+                }
+            }
+        }
+
+        LogVerbose($"    ✗ All methods failed");
+        return null;
+    }
+
+
+
+
     private float GetCurrentGameTime()
     {
         return (float) (Replay.Info?.LengthInMs ?? 0) / 1000.0f;
@@ -430,18 +1401,25 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         if (externalData != null)
         {
-            Console.WriteLine($"\n🔔 EXTERNAL DATA on channel {channelIndex}");
-            Console.WriteLine($"   Archive Type: {externalData.Archive.GetType().Name}");
+            LogVerbose($"\n🔔 EXTERNAL DATA on channel {channelIndex}");
+            LogVerbose($"   Archive Type: {externalData.Archive.GetType().Name}");
 
-            // Get the actor on this channel to identify the player
-            var actorGuid = channelToActorGuid.GetValueOrDefault(channelIndex);
-            var playerId = GetPlayerIdFromActor(actorGuid);
-            Console.WriteLine($"   Player: {playerId}");
+            try
+            {
+                // Parse the player name data from external data
+                var playerNameData = new PlayerNameData(externalData.Archive);
+                LogVerbose($"   Decoded Name: {playerNameData.DecodedName ?? "NULL"}");
 
-            // Existing player name data handling
-            var playerNameData = new PlayerNameData(externalData.Archive);
-            Builder.UpdatePrivateName(channelIndex, playerNameData);
-            LogVerbose($"External Data on Channel {channelIndex}");
+                // ✅ CRITICAL FIX: Pass the decoded name directly to the builder
+                // The builder will match it to the player by channel
+                Builder.UpdatePrivateName(channelIndex, playerNameData);
+
+                LogVerbose($"   ✓ Updated private name for channel {channelIndex}");
+            }
+            catch (Exception ex)
+            {
+                LogVerbose($"   ✗ Error parsing external data: {ex.Message}");
+            }
         }
     }
 
@@ -482,6 +1460,123 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         return "Unknown";
     }
 
+    private void PrintComplexProperty(object obj, string indent, Dictionary<string, HashSet<string>> tracker, string parentName, int depth = 0)
+    {
+        if (obj == null || depth > 3)
+        {
+            Console.WriteLine($"{indent}(null or max depth)");
+            return;
+        }
+
+        var objType = obj.GetType();
+
+        // Handle common types
+        if (objType.IsPrimitive || objType == typeof(string) || objType == typeof(decimal))
+        {
+            Console.WriteLine($"{indent}{obj}");
+            return;
+        }
+
+        // Handle enums
+        if (objType.IsEnum)
+        {
+            Console.WriteLine($"{indent}{obj} ({(int) obj})");
+            return;
+        }
+
+        var properties = objType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+        foreach (var prop in properties)
+        {
+            try
+            {
+                var value = prop.GetValue(obj);
+                var fullName = $"{parentName}.{prop.Name}";
+
+                if (!tracker.ContainsKey(fullName))
+                {
+                    tracker[fullName] = new HashSet<string>();
+                }
+
+                if (value == null)
+                {
+                    Console.WriteLine($"{indent}{prop.Name}: NULL");
+                    tracker[fullName].Add("NULL");
+                }
+                else if (prop.PropertyType.IsPrimitive || prop.PropertyType == typeof(string))
+                {
+                    Console.WriteLine($"{indent}{prop.Name}: {value}");
+                    tracker[fullName].Add(value.ToString());
+                }
+                else if (prop.PropertyType.IsEnum)
+                {
+                    Console.WriteLine($"{indent}{prop.Name}: {value} ({(int) value})");
+                    tracker[fullName].Add($"{value}({(int) value})");
+                }
+                else
+                {
+                    Console.WriteLine($"{indent}{prop.Name} ({prop.PropertyType.Name}):");
+                    PrintComplexProperty(value, indent + "  ", tracker, fullName, depth + 1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"{indent}{prop.Name}: <ERROR: {ex.Message}>");
+            }
+        }
+    }
+
+    private void PrintEliminationPropertySummary()
+    {
+        Console.WriteLine("\n" + new string('=', 80));
+        Console.WriteLine("ELIMINATION PROPERTY SUMMARY");
+        Console.WriteLine(new string('=', 80));
+        Console.WriteLine($"Total elimination events parsed: {eliminationSamples.Count}");
+        Console.WriteLine($"Unique properties found: {eliminationPropertiesFound.Count}");
+        Console.WriteLine();
+
+        foreach (var prop in eliminationPropertiesFound.OrderBy(x => x.Key))
+        {
+            Console.WriteLine($"\n{prop.Key}:");
+            Console.WriteLine($"  Unique values: {prop.Value.Count}");
+
+            // Show samples
+            var samples = prop.Value.Take(10).ToList();
+            if (samples.Any())
+            {
+                Console.WriteLine($"  Sample values:");
+                foreach (var sample in samples)
+                {
+                    Console.WriteLine($"    - {sample}");
+                }
+            }
+
+            // Check if always null
+            if (prop.Value.Count == 1 && prop.Value.Contains("NULL"))
+            {
+                Console.WriteLine($"  ⚠️ ALWAYS NULL across all {eliminationSamples.Count} events");
+            }
+        }
+
+        // Property availability matrix
+        Console.WriteLine("\n" + new string('-', 80));
+        Console.WriteLine("PROPERTY AVAILABILITY:");
+        Console.WriteLine(new string('-', 80));
+
+        foreach (var prop in eliminationPropertiesFound.OrderBy(x => x.Key))
+        {
+            var nullCount = prop.Value.Contains("NULL") ? 1 : 0;
+            var nonNullCount = prop.Value.Count - nullCount;
+            var availability = (double) nonNullCount / eliminationSamples.Count * 100;
+
+            var status = availability >= 90 ? "✅" : availability >= 50 ? "⚠️" : "❌";
+            Console.WriteLine($"{status} {prop.Key,-40} {availability:F1}% non-null");
+        }
+
+        Console.WriteLine("\n" + new string('=', 80) + "\n");
+    }
+
+
 
     protected override void OnNetDeltaRead(uint channelIndex, NetDeltaUpdate update)
     {
@@ -508,22 +1603,45 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 Builder.UpdateInventory(channelIndex, inventory);
                 break;
             case FortClientObservedStat clientStat:
+                LogVerbose($"\n📊 CLIENT STAT: {clientStat.StatName} = {clientStat.StatValue}");
+
+                // Highlight harvest-related stats
+                var statNameLower = clientStat.StatName.ToLower();
+                if (statNameLower.Contains("wood") || statNameLower.Contains("stone") ||
+                    statNameLower.Contains("metal") || statNameLower.Contains("material") ||
+                    statNameLower.Contains("harvest") || statNameLower.Contains("gather") ||
+                    statNameLower.Contains("resource") || statNameLower.Contains("farm"))
+                {
+                    LogVerbose($"  🎯 HARVEST-RELATED STAT!");
+
+                    // Try to identify player
+                    var playerId1 = Builder.GetPlayerIdFromChannel(channelIndex);
+                    if (string.IsNullOrEmpty(playerId1))
+                    {
+                        var actorGuid1 = channelToActorGuid.GetValueOrDefault(channelIndex);
+                        playerId1 = GetPlayerIdFromActor(actorGuid1);
+                    }
+
+                    LogVerbose($"  Player: {playerId1}");
+                    LogVerbose($"  Channel: {channelIndex}");
+                }
+
                 ProcessClientStat(clientStat, channelIndex);
                 break;
             case PlayerDamagedResourceBuilding harvest:
-                Console.WriteLine($"\n🪓 HARVEST EVENT DETECTED!");
-                Console.WriteLine($"  BuildingSMActor: {harvest.BuildingSMActor}");
-                Console.WriteLine($"  ResourceType: {harvest.PotentialResourceType}");
-                Console.WriteLine($"  ResourceCount: {harvest.PotentialResourceCount}");
-                Console.WriteLine($"  Destroyed: {harvest.bDestroyed}");
-                Console.WriteLine($"  Hit Weakspot: {harvest.bJustHitWeakspot}");
-                Console.WriteLine($"  Channel: {channelIndex}");
+                LogVerbose($"\n🪓 HARVEST EVENT DETECTED!");
+                LogVerbose($"  BuildingSMActor: {harvest.BuildingSMActor}");
+                LogVerbose($"  ResourceType: {harvest.PotentialResourceType}");
+                LogVerbose($"  ResourceCount: {harvest.PotentialResourceCount}");
+                LogVerbose($"  Destroyed: {harvest.bDestroyed}");
+                LogVerbose($"  Hit Weakspot: {harvest.bJustHitWeakspot}");
+                LogVerbose($"  Channel: {channelIndex}");
 
                 // Get player ID from channel
                 var actorGuid = channelToActorGuid.GetValueOrDefault(channelIndex);
                 var playerId = GetPlayerIdFromActor(actorGuid);
 
-                Console.WriteLine($"  Player: {playerId}");
+                LogVerbose($"  Player: {playerId}");
 
                 // Determine material type
                 string materialType = harvest.PotentialResourceType switch
@@ -543,7 +1661,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     (float) Builder.GetCurrentTimeDouble()
                 );
 
-                Console.WriteLine($"✓ Recorded: {playerId} harvested {harvest.PotentialResourceCount} {materialType}");
+                LogVerbose($"✓ Recorded: {playerId} harvested {harvest.PotentialResourceCount} {materialType}");
                 break;
 
             default:
@@ -812,305 +1930,291 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     protected override void OnExportRead(uint channelIndex, INetFieldExportGroup? exportGroup)
     {
 
-        // Log EVERY SINGLE export type
-        if (exportGroup != null)
-        {
-            allExportTypes.Add(exportGroup.GetType().FullName);
-        }
-
-        // Catch harvest RPC at the top level - FIRST!
-        if (exportGroup is PlayerDamagedResourceBuilding harvestRpc)
-        {
-            Console.WriteLine($"\n💎💎💎 HARVEST RPC FOUND via OnExportRead!");
-            Console.WriteLine($"  Channel: {channelIndex}");
-            Console.WriteLine($"  ResourceCount: {harvestRpc.PotentialResourceCount}");
-            Console.WriteLine($"  ResourceType: {harvestRpc.PotentialResourceType}");
-            Console.WriteLine($"  Weakspot: {harvestRpc.bJustHitWeakspot}");
-
-            string playerId = "Unknown";
-            if (broadcastChannelOwner.TryGetValue(channelIndex, out var ownerGuid))
-            {
-                playerId = GetPlayerIdFromActor(ownerGuid);
-            }
-            Console.WriteLine($"  Player: {playerId}");
-
-            var matchingHit = recentHarvestHits.FirstOrDefault(h => h.PlayerId == playerId);
-            string materialType = matchingHit?.MaterialType ?? (harvestRpc.PotentialResourceType switch
-            {
-                0 => "Wood",
-                1 => "Stone",
-                2 => "Metal",
-                _ => "Unknown"
-            });
-
-            HarvestTracker.RecordDirectHarvest(
-                playerId,
-                materialType,
-                harvestRpc.PotentialResourceCount,
-                harvestRpc.bJustHitWeakspot,
-                (float) Builder.GetCurrentTimeDouble()
-            );
-
-            Console.WriteLine($"  ✅ Recorded: {playerId} got {harvestRpc.PotentialResourceCount} {materialType}");
-        }
-
         if (exportGroup is PlayerPawnCache pawnCache)
         {
-            if (pawnCache.AnyRpc != null)
+            // Check for gameplay cues
+            if (pawnCache.InvokeGameplayCueAdded != null)
             {
-                LogVerbose($"[RPC Detected] Channel={channelIndex}, Type={exportGroup.GetType().Name}");
-            }
-        }
-        if (exportGroup != null)
-        {
-            var typeName = exportGroup.GetType().Name;
-            TrackExportOnChannel(channelIndex, typeName);
+                var cue = pawnCache.InvokeGameplayCueAdded;
 
-            // Deep scan for harvest-related content
-            var harvestKeywords = new[] { "harvest", "wood", "stone", "metal", "resource", "material", "pickaxe", "tree", "rock", "destruct" };
-            var isHarvestRelated = false;
-            var harvestDetails = new List<string>();
+                LogVerbose($"\n🎮 GAMEPLAY CUE ADDED");
+                LogVerbose($"  Tag: {cue.GameplayCueTag?.TagName}");
 
-            // Check type name
-            if (harvestKeywords.Any(keyword => typeName.ToLower().Contains(keyword)))
-            {
-                isHarvestRelated = true;
-                harvestDetails.Add($"Type name: {typeName}");
-            }
-
-            // Deep scan all properties and nested properties
-            ScanObjectForHarvestContent(exportGroup, "", harvestKeywords, ref isHarvestRelated, harvestDetails);
-
-            if (isHarvestRelated)
-            {
-                LogVerbose($"=== HARVEST CANDIDATE ===");
-                LogVerbose($"Type: {typeName}");
-                LogVerbose($"Channel: {channelIndex}");
-
-                // Get the NetField path
-                var attributes = exportGroup.GetType().GetCustomAttributes(typeof(NetFieldExportGroupAttribute), false);
-                foreach (NetFieldExportGroupAttribute attr in attributes)
+                if (cue.Parameters != null)
                 {
-                    LogVerbose($"Path: {attr.Path}");
+                    LogVerbose($"  Location: {cue.Parameters.Location}");
+                    LogVerbose($"  Instigator: {cue.Parameters.Instigator}");
+                    LogVerbose($"  EffectCauser: {cue.Parameters.EffectCauser}");
+                    LogVerbose($"  SourceObject: {cue.Parameters.SourceObject}");
                 }
 
-                LogVerbose($"Harvest Evidence:");
-                foreach (var detail in harvestDetails)
+                // Always print cue summary
+                var tagName = cue.GameplayCueTag?.TagName?.ToLower() ?? "";
+                var isHarvestRelated =
+                    tagName.Contains("harvest") ||
+                    tagName.Contains("pickaxe") ||
+                    tagName.Contains("gather") ||
+                    tagName.Contains("resource");
+
+                if (isHarvestRelated)
                 {
-                    LogVerbose($"  {detail}");
+                    LogVerbose("  🪓 HARVEST-RELATED CUE DETECTED");
                 }
 
-                LogVerbose($"All Properties:");
-                PrintAllProperties(exportGroup, "  ");
-                LogVerbose($"========================");
-            }
+                // Optional: print who triggered it if known
+                if (cue.Parameters?.Instigator > 0)
+                {
+                    var playerId = GetPlayerIdFromActor(cue.Parameters.Instigator);
+                    if (!string.IsNullOrEmpty(playerId))
+                        LogVerbose($"  ▶ Triggered by Player: {playerId}");
+                }
 
-            LogVerbose($"EXPORT: {typeName} on Channel {channelIndex}");
-
-            if (typeName == "GameState")
-            {
-                channelTypes[channelIndex] = "GAMESTATE";
-            }
-            else if (typeName == "FortPlayerState")
-            {
-                channelTypes[channelIndex] = "PLAYER_STATE";
-            }
-            else if (typeName == "PlayerPawn")
-            {
-                channelTypes[channelIndex] = "PLAYER_PAWN";
+                LogVerbose(new string('-', 60));
             }
         }
+
+
+
+        var actualType = exportGroup.GetType();
+        var fullName = actualType.FullName;
+        var assemblyName = actualType.Assembly.GetName().Name;
+
 
         switch (exportGroup)
         {
-            case FortBroadcastRemoteClientInfo remoteClientInfo:
-                // Declare playerId ONCE at the top of this case
-                string playerId = "Unknown";
-                if (broadcastChannelOwner.TryGetValue(channelIndex, out var ownerGuid))
-                {
-                    playerId = GetPlayerIdFromActor(ownerGuid);
-                }
 
-                // Store the owner whenever we see it
-                if (remoteClientInfo.Owner.HasValue)
-                {
-                    broadcastChannelOwner[channelIndex] = remoteClientInfo.Owner.Value;
-                    playerId = GetPlayerIdFromActor(remoteClientInfo.Owner.Value);
-                }
+            case GameState state:
+                Builder.UpdateGameState(state);
+                break;
 
-                // Check for harvest HIT (geometry data)
-                bool hasHarvestHit = remoteClientInfo.ParentObject.HasValue &&
-                                     remoteClientInfo.Position != null;
-
-                if (hasHarvestHit)
-                {
-                    var objectId = remoteClientInfo.ParentObject.Value;
-                    var currentTime = (float) Builder.GetCurrentTimeDouble();
-
-                    Console.WriteLine($"\n🪓 HARVEST HIT!");
-                    Console.WriteLine($"  Player: {playerId}");
-                    Console.WriteLine($"  Object GUID: {objectId}");
-                    Console.WriteLine($"  Hit #{remoteClientInfo.HitCount}");
-
-                    string materialType = "Unknown";
-                    string blueprintClass = "Unknown";
-                    HarvestableData harvestData = null;
-
-                    if (_netGuidCache.TryGetPathName(objectId, out var objectPath))
-                    {
-                        Console.WriteLine($"  🎯 Object: {objectPath}");
-
-                        // Extract blueprint class
-                        blueprintClass = ExtractBlueprintClass(objectPath);
-
-                        // Try to get from database
-                        if (harvestableDatabase.TryGetHarvestable(blueprintClass, out harvestData))
-                        {
-                            materialType = harvestData.resourceType;
-                            Console.WriteLine($"  ✅ Known harvestable: {materialType} (Yield: {harvestData.materialYield})");
-                        }
-                        else
-                        {
-                            // Unknown - track it for later
-                            materialType = GetMaterialTypeFromArchetype(objectPath);
-                            Console.WriteLine($"  ❓ Unknown harvestable - guessing: {materialType}");
-
-                            // Track for export
-                            TrackUnknownHarvestable(objectPath, objectPath, playerId, currentTime);
-                        }
-
-                        Console.WriteLine($"  📦 Material: {materialType}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"  ⚠️ No object path found for GUID {objectId}");
-                    }
-
-                    // Store this hit for correlation with RPC
-                    recentHarvestHits.Enqueue(new HarvestHit
-                    {
-                        PlayerId = playerId,
-                        ObjectGuid = objectId,
-                        MaterialType = materialType,
-                        Timestamp = DateTime.UtcNow
-                    });
-
-                    // Keep queue manageable
-                    while (recentHarvestHits.Count > 0 &&
-                           (DateTime.UtcNow - recentHarvestHits.Peek().Timestamp).TotalSeconds > 5)
-                    {
-                        recentHarvestHits.Dequeue();
-                    }
-                }
-
-                // Check AnyRpc - THIS IS WHERE THE HARVEST RPC COMES THROUGH
-                if (remoteClientInfo.AnyRpc != null)
-                {
-                    if (remoteClientInfo.AnyRpc is PlayerDamagedResourceBuilding harvestFromAnyRpc)
-                    {
-                        Console.WriteLine($"\n💎 HARVEST RPC DETECTED (from AnyRpc)!");
-                        Console.WriteLine($"  Player: {playerId}");
-                        Console.WriteLine($"  BuildingSMActor: {harvestFromAnyRpc.BuildingSMActor}");
-                        Console.WriteLine($"  ResourceType: {harvestFromAnyRpc.PotentialResourceType}");
-                        Console.WriteLine($"  ResourceCount: {harvestFromAnyRpc.PotentialResourceCount}");
-                        Console.WriteLine($"  Destroyed: {harvestFromAnyRpc.bDestroyed}");
-                        Console.WriteLine($"  Hit Weakspot: {harvestFromAnyRpc.bJustHitWeakspot}");
-
-                        // Try to match with recent hit
-                        var matchingHit = recentHarvestHits.FirstOrDefault(h => h.PlayerId == playerId);
-
-                        string materialType;
-                        if (matchingHit != null)
-                        {
-                            materialType = matchingHit.MaterialType;
-                            Console.WriteLine($"  ✅ Matched with hit on {materialType}");
-
-                            // Remove matched hit
-                            var tempList = recentHarvestHits.ToList();
-                            tempList.Remove(matchingHit);
-                            recentHarvestHits = new Queue<HarvestHit>(tempList);
-                        }
-                        else
-                        {
-                            // Fallback to RPC's resource type
-                            materialType = harvestFromAnyRpc.PotentialResourceType switch
-                            {
-                                0 => "Wood",
-                                1 => "Stone",
-                                2 => "Metal",
-                                _ => "Unknown"
-                            };
-                            Console.WriteLine($"  ⚠️ No matching hit, using RPC type: {materialType}");
-                        }
-
-                        // Record the harvest!
-                        HarvestTracker.RecordDirectHarvest(
-                            playerId,
-                            materialType,
-                            harvestFromAnyRpc.PotentialResourceCount,
-                            harvestFromAnyRpc.bJustHitWeakspot,
-                            (float) Builder.GetCurrentTimeDouble()
-                        );
-
-                        Console.WriteLine($"  ✓ Recorded: {playerId} harvested {harvestFromAnyRpc.PotentialResourceCount} {materialType}");
-                    }
-                    else if (remoteClientInfo.AnyRpc is AddMapMarker marker)
-                    {
-                        LogVerbose($"Map marker added by player {marker.PlayerID}");
-                    }
-                    else if (remoteClientInfo.AnyRpc is RemoveMapMarker removeMarker)
-                    {
-                        LogVerbose($"Map marker removed by player {removeMarker.PlayerID}");
-                    }
-                }
-
-                // Also check the direct property (backup, in case it's populated there)
-                if (remoteClientInfo.PlayerDamagedResourceBuilding != null)
-                {
-                    var harvestFromProperty = remoteClientInfo.PlayerDamagedResourceBuilding;
-                    Console.WriteLine($"\n💎 HARVEST RPC (Direct property)!");
-
-                    var matchingHit = recentHarvestHits.FirstOrDefault(h => h.PlayerId == playerId);
-
-                    string materialType;
-                    if (matchingHit != null)
-                    {
-                        materialType = matchingHit.MaterialType;
-                        var tempList = recentHarvestHits.ToList();
-                        tempList.Remove(matchingHit);
-                        recentHarvestHits = new Queue<HarvestHit>(tempList);
-                    }
-                    else
-                    {
-                        materialType = harvestFromProperty.PotentialResourceType switch
-                        {
-                            0 => "Wood",
-                            1 => "Stone",
-                            2 => "Metal",
-                            _ => "Unknown"
-                        };
-                    }
-
-                    HarvestTracker.RecordDirectHarvest(
-                        playerId,
-                        materialType,
-                        harvestFromProperty.PotentialResourceCount,
-                        harvestFromProperty.bJustHitWeakspot,
-                        (float) Builder.GetCurrentTimeDouble()
-                    );
-
-                    Console.WriteLine($"  ✓ Recorded: {playerId} harvested {harvestFromProperty.PotentialResourceCount} {materialType}");
-                }
-
+            case PlaylistInfo playlist:
+                Builder.UpdatePlaylistInfo(playlist);
                 break;
 
             case PlayerPawn pawn:
                 LogVerbose($"\n=== PLAYER PAWN UPDATE ===");
                 LogVerbose($"PawnUniqueID: {pawn.PawnUniqueID}");
-
                 Builder.UpdatePlayerPawn(channelIndex, pawn);
                 ProcessPlayerPawn(pawn, channelIndex);
                 PrintObjectProperties(pawn, "PlayerPawn", 0);
+                break;
+
+            case FortBroadcastRemoteClientInfo remoteClientInfo:
+                LogVerbose($"\n" + new string('=', 80));
+                LogVerbose($"📡 FortBroadcastRemoteClientInfo - Channel {channelIndex}");
+
+                // ✅ DEBUG: Print what we're looking up
+                LogVerbose($"DEBUG: mostRecentActiveChannel = {mostRecentActiveChannel}");
+                LogVerbose($"DEBUG: channelToPlayerId contains {channelToPlayerId.Count} entries:");
+                foreach (var kvp in channelToPlayerId.Take(5))
+                {
+                    LogVerbose($"  Channel {kvp.Key} → Player {kvp.Value}");
+                }
+
+                // ✅ PRINT CHANNEL OWNER
+                string channelOwner = "UNKNOWN";
+                if (mostRecentActiveChannel > 0 && channelToPlayerId.TryGetValue(mostRecentActiveChannel, out var playerId))
+                {
+                    channelOwner = playerId;
+                    LogVerbose($"✅ Found owner via mostRecentActiveChannel");
+                }
+                else
+                {
+                    LogVerbose($"❌ mostRecentActiveChannel ({mostRecentActiveChannel}) not in channelToPlayerId");
+                }
+
+                LogVerbose($"Channel Owner: {channelOwner}");
+                LogVerbose(new string('=', 80));
+
+                // Get the type and print ALL properties
+                var type = remoteClientInfo.GetType();
+                var properties = type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+                LogVerbose($"Total Properties: {properties.Length}");
+                LogVerbose(null);
+
+                foreach (var prop in properties)
+                {
+                    try
+                    {
+                        var value = prop.GetValue(remoteClientInfo);
+                        LogVerbose($"{prop.Name} ({prop.PropertyType.Name}):");
+                        LogVerbose($"  Value: {value ?? "NULL"}");
+
+                        // If it's a complex object, drill down completely
+                        if (value != null && !prop.PropertyType.IsPrimitive && prop.PropertyType != typeof(string) && !prop.PropertyType.IsEnum)
+                        {
+                            // Handle collections
+                            if (value is System.Collections.IEnumerable enumerable && !(value is string))
+                            {
+                                var items = enumerable.Cast<object>().ToList();
+                                LogVerbose($"  [Collection: {items.Count} items]");
+
+                                for (int i = 0; i < items.Count; i++)
+                                {
+                                    LogVerbose($"    [{i}]: {items[i]}");
+
+                                    // Print properties of collection items
+                                    if (items[i] != null)
+                                    {
+                                        var itemType = items[i].GetType();
+                                        if (!itemType.IsPrimitive && itemType != typeof(string))
+                                        {
+                                            var itemProps = itemType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                            foreach (var itemProp in itemProps)
+                                            {
+                                                try
+                                                {
+                                                    var itemValue = itemProp.GetValue(items[i]);
+                                                    LogVerbose($"      {itemProp.Name}: {itemValue ?? "NULL"}");
+                                                }
+                                                catch (Exception ex)
+                                                {
+                                                    LogVerbose($"      {itemProp.Name}: <error: {ex.Message}>");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                // Print all nested object properties
+                                var nestedProps = value.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                LogVerbose($"  [Object with {nestedProps.Length} properties]");
+
+                                foreach (var nestedProp in nestedProps)
+                                {
+                                    try
+                                    {
+                                        var nestedValue = nestedProp.GetValue(value);
+                                        LogVerbose($"    {nestedProp.Name} ({nestedProp.PropertyType.Name}): {nestedValue ?? "NULL"}");
+
+                                        // Go one more level deep if needed
+                                        if (nestedValue != null && !nestedProp.PropertyType.IsPrimitive &&
+                                            nestedProp.PropertyType != typeof(string) && !nestedProp.PropertyType.IsEnum)
+                                        {
+                                            var deepProps = nestedValue.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                            foreach (var deepProp in deepProps)
+                                            {
+                                                try
+                                                {
+                                                    var deepValue = deepProp.GetValue(nestedValue);
+                                                    LogVerbose($"      └─ {deepProp.Name}: {deepValue ?? "NULL"}");
+                                                }
+                                                catch { }
+                                            }
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        LogVerbose($"    {nestedProp.Name}: <error: {ex.Message}>");
+                                    }
+                                }
+                            }
+                        }
+
+                        LogVerbose(null); // Blank line between properties
+                    }
+                    catch (Exception ex)
+                    {
+                        LogVerbose($"{prop.Name}: <ERROR: {ex.Message}>");
+                        LogVerbose(null);
+                    }
+                }
+
+                // Analysis section
+                LogVerbose(new string('-', 80));
+                LogVerbose("HARVEST HIT ANALYSIS:");
+                LogVerbose(new string('-', 80));
+
+                bool hasOwner = remoteClientInfo.Owner.HasValue;
+                bool hasParentObject = remoteClientInfo.ParentObject.HasValue;
+                bool hasPosition = remoteClientInfo.Position != null;
+
+                LogVerbose($"Has Owner: {hasOwner}");
+                if (hasOwner)
+                {
+                    LogVerbose($"  Owner Actor GUID: {remoteClientInfo.Owner.Value}");
+                }
+
+                LogVerbose($"Has ParentObject: {hasParentObject}");
+                if (hasParentObject)
+                {
+                    LogVerbose($"  ParentObject GUID: {remoteClientInfo.ParentObject.Value}");
+
+                    if (_netGuidCache.TryGetPathName(remoteClientInfo.ParentObject.Value, out var objectPath))
+                    {
+                        LogVerbose($"  Object Path: {objectPath}");
+                        var materialType = GetMaterialTypeFromArchetype(objectPath);
+                        LogVerbose($"  Material Type: {materialType}");
+
+                        if (materialType == "Wood" || materialType == "Stone" || materialType == "Metal")
+                        {
+                            LogVerbose($"  ✅ THIS IS A REAL HARVEST HIT!");
+                        }
+                        else
+                        {
+                            LogVerbose($"  ❌ NOT a harvestable material");
+                        }
+                    }
+                    else
+                    {
+                        LogVerbose($"  ⚠️ Could not resolve object path");
+                    }
+                }
+
+                LogVerbose($"Has Position: {hasPosition}");
+                if (hasPosition)
+                {
+                    LogVerbose($"  Position: {remoteClientInfo.Position}");
+                }
+
+                LogVerbose(new string('=', 80));
+                LogVerbose(null); // Extra blank line for readability
+
+                // ✅ NEW HARVEST TRACKING LOGIC - Only track broadcasts with NO owner but WITH ParentObject
+                if (!hasOwner && hasParentObject && hasPosition)
+                {
+                    var objectGuid = remoteClientInfo.ParentObject.Value;
+
+                    if (_netGuidCache.TryGetPathName(objectGuid, out var objectPath))
+                    {
+                        var materialType = GetMaterialTypeFromArchetype(objectPath);
+
+                        if (materialType == "Wood" || materialType == "Stone" || materialType == "Metal")
+                        {
+                            if (!string.IsNullOrEmpty(channelOwner) && channelOwner != "UNKNOWN")
+                            {
+                                LogVerbose($"🪓 RECORDING HARVEST: {channelOwner} hit {materialType}");
+
+                                HarvestTracker.RecordDirectHarvest(
+                                    channelOwner,
+                                    materialType,
+                                    1,
+                                    false,
+                                    (float) Builder.GetCurrentTimeDouble()
+                                );
+
+                                var blueprintClass = ExtractBlueprintClass(objectPath);
+                                if (!harvestableDatabase.Contains(blueprintClass))
+                                {
+                                    TrackUnknownHarvestable(objectPath, objectPath, channelOwner, (float) Builder.GetCurrentTimeDouble());
+                                }
+                            }
+                            else
+                            {
+                                LogVerbose($"⚠️ Cannot record harvest - channel owner unknown");
+                            }
+                        }
+                    }
+                }
+
+                break;
+
+            case FortPlayerState state:
+                Builder.UpdatePlayerState(channelIndex, state);
+                ProcessPlayerState(state, channelIndex);
                 break;
 
             case BatchedDamageCues damageCues:
@@ -1149,9 +2253,9 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             case FortPickup pickup:
                 if (IsMaterialItem(pickup.ItemDefinition?.Name))
                 {
-                    Console.WriteLine($"\n=== MATERIAL PICKUP DEBUG ===");
+                    LogVerbose($"\n=== MATERIAL PICKUP DEBUG ===");
                     PrintObjectProperties(pickup, "FortPickup", 0);
-                    Console.WriteLine($"=== END DEBUG ===\n");
+                    LogVerbose($"=== END DEBUG ===\n");
                 }
                 break;
 
@@ -1256,6 +2360,289 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 }
                 break;
         }
+    }
+
+    private void PostProcessHarvestHits()
+    {
+        LogVerbose("\n" + new string('=', 80));
+        LogVerbose("=== POST-PROCESSING HARVEST HITS - SUPER VERBOSE ===");
+        LogVerbose(new string('=', 80));
+
+        LogVerbose($"\n📊 INITIAL STATE:");
+        LogVerbose($"   unresolvedHarvestHits.Count: {unresolvedHarvestHits.Count}");
+        LogVerbose($"   unresolvedHarvestHits instance: {unresolvedHarvestHits.GetHashCode()}");
+
+        if (unresolvedHarvestHits.Count == 0)
+        {
+            LogVerbose("\n❌ CRITICAL: unresolvedHarvestHits is EMPTY!");
+            LogVerbose("   This means either:");
+            LogVerbose("   1. No harvest hits were detected during parsing");
+            LogVerbose("   2. The list was cleared between parsing and post-processing");
+            LogVerbose("   3. We're looking at a different instance of the list");
+            return;
+        }
+
+        var allPlayers = Builder.GetAllPlayers().ToList();
+        LogVerbose($"   Total players from builder: {allPlayers.Count}");
+        LogVerbose($"   Total actorGuidToPlayerId mappings: {actorGuidToPlayerId.Count}");
+
+        // ============================================================================
+        // BUILD REAL PLAYER MAP
+        // ============================================================================
+        LogVerbose($"\n" + new string('-', 80));
+        LogVerbose("BUILDING REAL PLAYER MAP");
+        LogVerbose(new string('-', 80));
+
+        var realActorToPlayer = new Dictionary<uint, string>();
+
+        foreach (var mapping in actorGuidToPlayerId)
+        {
+            LogVerbose($"\n  Checking actor {mapping.Key} → {mapping.Value}");
+
+            var player = allPlayers.FirstOrDefault(p =>
+                p.PlayerId.Equals(mapping.Value, StringComparison.OrdinalIgnoreCase));
+
+            if (player == null)
+            {
+                LogVerbose($"    ❌ SKIPPED: Not found in builder");
+                continue;
+            }
+
+            LogVerbose($"    ✓ Found in builder");
+            LogVerbose($"       Name: {player.PlayerName ?? "NULL"}");
+            LogVerbose($"       Is Bot: {player.IsBot}");
+
+            if (player.IsBot)
+            {
+                LogVerbose($"    ❌ SKIPPED: Is a bot");
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(player.PlayerName))
+            {
+                LogVerbose($"    ❌ SKIPPED: No player name");
+                continue;
+            }
+
+            if (player.PlayerName == player.PlayerId)
+            {
+                LogVerbose($"    ❌ SKIPPED: Name equals ID (fake player)");
+                continue;
+            }
+
+            // This is a REAL player!
+            realActorToPlayer[mapping.Key] = player.PlayerId;
+            LogVerbose($"    ✅ ADDED to real player map");
+        }
+
+        LogVerbose($"\n✅ Real actor→player mappings: {realActorToPlayer.Count}");
+
+        if (realActorToPlayer.Count == 0)
+        {
+            LogVerbose("\n❌ CRITICAL ERROR: No real player mappings found!");
+            LogVerbose("   All actors were filtered out. Reasons:");
+            LogVerbose("   - Not found in builder");
+            LogVerbose("   - Are bots");
+            LogVerbose("   - Have no player name");
+            LogVerbose("   - Name equals ID (fake players)");
+            return;
+        }
+
+        LogVerbose($"\nReal player actors: {string.Join(", ", realActorToPlayer.Keys.OrderBy(x => x))}");
+
+        // ============================================================================
+        // PROCESS EACH HARVEST HIT
+        // ============================================================================
+        LogVerbose($"\n" + new string('-', 80));
+        LogVerbose($"PROCESSING {unresolvedHarvestHits.Count} HARVEST HITS");
+        LogVerbose(new string('-', 80));
+
+        int resolved = 0;
+        int unresolved = 0;
+        int processedCount = 0;
+
+        foreach (var hit in unresolvedHarvestHits)
+        {
+            processedCount++;
+            LogVerbose($"\n[{processedCount}/{unresolvedHarvestHits.Count}] Processing harvest hit:");
+            LogVerbose($"  Owner Actor: {hit.OwnerActorGuid}");
+            LogVerbose($"  Channel: {hit.ChannelIndex}");
+            LogVerbose($"  Material: {hit.MaterialType}");
+            LogVerbose($"  Object: {hit.ObjectPath}");
+            LogVerbose($"  Time: {hit.GameTime:F2}s");
+
+            string playerId = null;
+
+            // METHOD 1: Direct lookup
+            LogVerbose($"\n  Trying Method 1: Direct actor lookup");
+            if (realActorToPlayer.TryGetValue(hit.OwnerActorGuid, out playerId))
+            {
+                LogVerbose($"    ✅ SUCCESS: Found direct match");
+                var player = allPlayers.First(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+                LogVerbose($"    Player: {playerId}");
+                LogVerbose($"    Name: {player.PlayerName}");
+            }
+            else
+            {
+                LogVerbose($"    ❌ FAILED: Actor {hit.OwnerActorGuid} not in real player map");
+                LogVerbose($"    Available actors: {string.Join(", ", realActorToPlayer.Keys.OrderBy(x => x).Take(10))}");
+
+                // METHOD 2: Nearest-neighbor
+                LogVerbose($"\n  Trying Method 2: Nearest-neighbor search (distance <= 20)");
+
+                uint? nearestActor = null;
+                int nearestDistance = int.MaxValue;
+
+                foreach (var mapping in realActorToPlayer)
+                {
+                    int distance = Math.Abs((int) mapping.Key - (int) hit.OwnerActorGuid);
+
+                    if (processedCount <= 3) // Only log for first 3 hits
+                    {
+                        LogVerbose($"      Checking actor {mapping.Key}: distance = {distance}");
+                    }
+
+                    if (distance < nearestDistance && distance <= 20)
+                    {
+                        nearestDistance = distance;
+                        nearestActor = mapping.Key;
+                        playerId = mapping.Value;
+                    }
+                }
+
+                if (nearestActor.HasValue)
+                {
+                    LogVerbose($"    ✅ SUCCESS: Found nearby actor");
+                    LogVerbose($"    Nearest Actor: {nearestActor.Value}");
+                    LogVerbose($"    Distance: {nearestDistance}");
+                    var player = allPlayers.First(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+                    LogVerbose($"    Player: {playerId}");
+                    LogVerbose($"    Name: {player.PlayerName}");
+                }
+                else
+                {
+                    LogVerbose($"    ❌ FAILED: No actor within distance 20");
+
+                    // Find absolute nearest for diagnostic
+                    var absoluteNearest = realActorToPlayer.Keys
+                        .Select(actor => new { actor, distance = Math.Abs((int) actor - (int) hit.OwnerActorGuid) })
+                        .OrderBy(x => x.distance)
+                        .First();
+
+                    LogVerbose($"    Nearest actor (any distance): {absoluteNearest.actor} (distance: {absoluteNearest.distance})");
+                }
+            }
+
+            // RESOLUTION RESULT
+            if (!string.IsNullOrEmpty(playerId))
+            {
+                LogVerbose($"\n  ✅ RESOLVED - Recording harvest");
+
+                var cleanId = playerId.Replace("-", "").ToLower();
+                LogVerbose($"    Clean ID: {cleanId}");
+
+                HarvestTracker.RecordDirectHarvest(cleanId, hit.MaterialType, 1, false, hit.GameTime);
+                LogVerbose($"    ✓ Recorded in HarvestTracker");
+
+                if (!string.IsNullOrEmpty(hit.ObjectPath))
+                {
+                    var blueprintClass = ExtractBlueprintClass(hit.ObjectPath);
+                    if (!harvestableDatabase.Contains(blueprintClass))
+                    {
+                        TrackUnknownHarvestable(hit.ObjectPath, hit.ObjectPath, cleanId, hit.GameTime);
+                        LogVerbose($"    ✓ Tracked as unknown harvestable");
+                    }
+                }
+
+                resolved++;
+            }
+            else
+            {
+                LogVerbose($"\n  ❌ UNRESOLVED - Could not find player");
+                unresolved++;
+            }
+
+            // Stop detailed logging after first 5 to avoid spam
+            if (processedCount >= 5)
+            {
+                LogVerbose($"\n  (Switching to summary mode after 5 hits...)");
+                break;
+            }
+        }
+
+        // CONTINUE PROCESSING REST WITHOUT VERBOSE LOGGING
+        if (unresolvedHarvestHits.Count > 5)
+        {
+            LogVerbose($"\n  Processing remaining {unresolvedHarvestHits.Count - 5} hits...");
+
+            for (int i = 5; i < unresolvedHarvestHits.Count; i++)
+            {
+                var hit = unresolvedHarvestHits[i];
+                string playerId = null;
+
+                if (realActorToPlayer.TryGetValue(hit.OwnerActorGuid, out playerId))
+                {
+                    // Direct match
+                }
+                else
+                {
+                    // Nearest neighbor
+                    uint? nearestActor = null;
+                    int nearestDistance = int.MaxValue;
+
+                    foreach (var mapping in realActorToPlayer)
+                    {
+                        int distance = Math.Abs((int) mapping.Key - (int) hit.OwnerActorGuid);
+                        if (distance < nearestDistance && distance <= 20)
+                        {
+                            nearestDistance = distance;
+                            nearestActor = mapping.Key;
+                            playerId = mapping.Value;
+                        }
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(playerId))
+                {
+                    var cleanId = playerId.Replace("-", "").ToLower();
+                    HarvestTracker.RecordDirectHarvest(cleanId, hit.MaterialType, 1, false, hit.GameTime);
+
+                    if (!string.IsNullOrEmpty(hit.ObjectPath))
+                    {
+                        var blueprintClass = ExtractBlueprintClass(hit.ObjectPath);
+                        if (!harvestableDatabase.Contains(blueprintClass))
+                        {
+                            TrackUnknownHarvestable(hit.ObjectPath, hit.ObjectPath, cleanId, hit.GameTime);
+                        }
+                    }
+
+                    resolved++;
+                }
+                else
+                {
+                    unresolved++;
+                }
+            }
+        }
+
+        // ============================================================================
+        // FINAL STATISTICS
+        // ============================================================================
+        LogVerbose($"\n" + new string('=', 80));
+        LogVerbose("FINAL STATISTICS");
+        LogVerbose(new string('=', 80));
+
+        LogVerbose($"\n✅ Successfully resolved: {resolved} harvest hits");
+        LogVerbose($"❌ Failed to resolve: {unresolved} harvest hits");
+
+        if (unresolvedHarvestHits.Count > 0)
+        {
+            LogVerbose($"📊 Success rate: {(resolved * 100.0 / unresolvedHarvestHits.Count):F1}%");
+        }
+
+        LogVerbose($"\n" + new string('=', 80));
+        LogVerbose("END OF POST-PROCESSING");
+        LogVerbose(new string('=', 80) + "\n");
     }
 
     private object GetPropertyValue(object obj, string propertyName)
@@ -1573,82 +2960,95 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         var channel = Channels[channelIndex];
         var actorGuid = channel?.Actor?.ActorNetGUID?.Value;
-        var realEpicId = state.UniqueId ?? state.UniqueID;
-        var platformId = state.PlatformUniqueNetId;
-        var botId = state.BotUniqueId;
-        var isBot = state.bIsABot == true;
 
-        var actualPlayerId = isBot ? botId : (realEpicId ?? platformId);
 
-        LogVerbose($"=== PLAYER STATE on Channel {channelIndex} ===");
-        LogVerbose($"Player ID: {actualPlayerId}");
-        LogVerbose($"Actor GUID: {actorGuid}");
-        LogVerbose($"Is Bot: {isBot}");
+        var playerIdFromBuilder = Builder.GetPlayerIdFromAnyChannel(channelIndex);
 
-        if (!string.IsNullOrEmpty(actualPlayerId))
+
+        if (string.IsNullOrEmpty(playerIdFromBuilder))
         {
-            string playerName = actualPlayerId;
-
-            var playerStateType = state.GetType();
-            var nameProperties = new[] { "PlayerName", "PlayerNamePrivate", "Name", "DisplayName", "UserName" };
-
-            foreach (var propName in nameProperties)
-            {
-                var property = playerStateType.GetProperty(propName);
-                if (property != null && property.PropertyType == typeof(string))
-                {
-                    var value = property.GetValue(state) as string;
-                    if (!string.IsNullOrEmpty(value))
-                    {
-                        playerName = value;
-                        break;
-                    }
-                }
-            }
-
-            playerNames[actualPlayerId] = playerName;
-            LogVerbose($"Player Name: {playerName}");
+            LogVerbose($"⚠️ Could not get player ID from builder for channel {channelIndex}");
+            return; // Exit early if we can't identify the player
         }
 
-        if (actorGuid.HasValue && !string.IsNullOrEmpty(actualPlayerId))
-        {
-            actorGuidToPlayerId[actorGuid.Value] = actualPlayerId;
-            if (!playerInfoByPlayerId.ContainsKey(actualPlayerId))
-            {
-                // ADD TEAMINDEX HERE - Create PlayerInfo with TeamIndex
-                var playerInfo = new PlayerInfo(actualPlayerId, channelIndex, actorGuid.Value, actualPlayerId);
 
-                // Set TeamIndex from state if available
+        // ✅ LET THE BUILDER HANDLE THE PLAYER FIRST
+        // The builder creates the player and determines the correct ID format
+        Builder.UpdatePlayerState(channelIndex, state);
+
+        if (state.PlayerTeam != null)
+        {
+            //Console.WriteLine($"PlayerTeam: {state.PlayerTeam}");
+            var props = state.PlayerTeam.GetType().GetProperties();
+            foreach (var prop in props)
+            {
+                try
+                {
+                    var value = prop.GetValue(state.PlayerTeam);
+                    Console.WriteLine($"  {prop.Name} = {value}");
+                }
+                catch { }
+            }
+        }
+
+        LogVerbose($"\n🔍 PLAYER STATE DEBUG:");
+        LogVerbose($"   Channel: {channelIndex}");
+        LogVerbose($"   Actor GUID: {actorGuid}");
+        LogVerbose($"   Player ID from Builder: {playerIdFromBuilder}");
+
+        // ✅ LOG ATHENAKILLS UPDATE
+        if (state.AthenaKills.HasValue)
+        {
+            //Console.WriteLine($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = {state.AthenaKills.Value}");
+            LogVerbose($"   AthenaKills: {state.AthenaKills.Value}");
+
+            // Store it in playerRealtimeStats
+            if (!string.IsNullOrEmpty(playerIdFromBuilder))
+            {
+                if (!playerRealtimeStats.ContainsKey(playerIdFromBuilder))
+                    playerRealtimeStats[playerIdFromBuilder] = new Dictionary<string, object>();
+
+                playerRealtimeStats[playerIdFromBuilder]["AthenaKills"] = state.AthenaKills.Value;
+            }
+        }
+        else
+        {
+            //Console.WriteLine($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = NULL");
+            LogVerbose($"   AthenaKills: NULL");
+        }
+
+
+
+
+        // ✅ MAP ACTOR TO THE BUILDER'S PLAYER ID
+        if (actorGuid.HasValue && !string.IsNullOrEmpty(playerIdFromBuilder))
+        {
+            actorGuidToPlayerId[actorGuid.Value] = playerIdFromBuilder;
+            LogVerbose($"   ✅ MAPPED: Actor {actorGuid.Value} → Player {playerIdFromBuilder}");
+
+            DamageTracker.MapActorToPlayer(actorGuid.Value, playerIdFromBuilder);
+
+            if (!playerInfoByPlayerId.ContainsKey(playerIdFromBuilder))
+            {
+                var playerInfo = new PlayerInfo(playerIdFromBuilder, channelIndex, actorGuid.Value, playerIdFromBuilder, actorGuid.Value);
+
                 if (state.TeamIndex.HasValue)
                 {
                     playerInfo.TeamIndex = (byte) state.TeamIndex.Value;
-                    LogVerbose($"Team Index: {state.TeamIndex.Value}");
                 }
 
-                playerInfoByPlayerId[actualPlayerId] = playerInfo;
-                LogVerbose($"MAPPED: Actor {actorGuid.Value} -> Player {actualPlayerId}");
-                DamageTracker.MapActorToPlayer(actorGuid.Value, actualPlayerId);
-            }
-            else
-            {
-                // Update existing PlayerInfo with TeamIndex if needed
-                if (state.TeamIndex.HasValue)
-                {
-                    playerInfoByPlayerId[actualPlayerId].TeamIndex = (byte) state.TeamIndex.Value;
-                }
+                playerInfoByPlayerId[playerIdFromBuilder] = playerInfo;
             }
         }
 
-
-
+        // Rest of your material tracking code...
         var stateType = state.GetType();
         var knownMaterialProps = new[] {
         "CurrentWood", "CurrentStone", "CurrentMetal",
         "Wood", "Stone", "Metal",
         "ResourceWood", "ResourceStone", "ResourceMetal",
         "WoodCount", "StoneCount", "MetalCount"
-        };
-
+    };
 
         uint? wood = null, stone = null, metal = null;
 
@@ -1675,12 +3075,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                         else if (propName.ToLower().Contains("metal")) metal = uintVal;
                     }
 
-                    if (!string.IsNullOrEmpty(actualPlayerId))
+                    if (!string.IsNullOrEmpty(playerIdFromBuilder))
                     {
-                        if (!playerRealtimeStats.ContainsKey(actualPlayerId))
-                            playerRealtimeStats[actualPlayerId] = new Dictionary<string, object>();
+                        if (!playerRealtimeStats.ContainsKey(playerIdFromBuilder))
+                            playerRealtimeStats[playerIdFromBuilder] = new Dictionary<string, object>();
 
-                        playerRealtimeStats[actualPlayerId][propName] = value ?? 0;
+                        playerRealtimeStats[playerIdFromBuilder][propName] = value ?? 0;
                     }
                 }
                 catch (Exception ex)
@@ -1690,8 +3090,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
         }
 
-
-        AnalyzeForStats(state, "FortPlayerState", channelIndex, actualPlayerId);
+        AnalyzeForStats(state, "FortPlayerState", channelIndex, playerIdFromBuilder);
     }
 
     private void ProcessPlayerPawn(PlayerPawn pawn, uint channelIndex)
@@ -1705,6 +3104,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         LogVerbose($"PlayerState GUID: {playerStateActorGuid}");
 
         string? pawnPlayerId = null;
+
+        // Try to resolve player ID
         if (pawnActorGuid.HasValue && actorGuidToPlayerId.ContainsKey(pawnActorGuid.Value))
         {
             pawnPlayerId = actorGuidToPlayerId[pawnActorGuid.Value];
@@ -1714,10 +3115,23 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         {
             pawnPlayerId = actorGuidToPlayerId[playerStateActorGuid.Value];
             LogVerbose($"✓ Found player via PlayerState GUID: {pawnPlayerId}");
+
+            // CRITICAL: Map the pawn to this player
             if (pawnActorGuid.HasValue)
             {
                 actorGuidToPlayerId[pawnActorGuid.Value] = pawnPlayerId;
+
+                if (playerInfoByPlayerId.TryGetValue(pawnPlayerId, out var playerInfo))
+                {
+                    pawnToPlayerState[pawnActorGuid.Value] = playerInfo;
+                    LogVerbose($"✅ MAPPED PAWN: {pawnActorGuid.Value} → {pawnPlayerId}");
+                }
+
                 DamageTracker.MapActorToPlayer(pawnActorGuid.Value, pawnPlayerId);
+
+                // ✅ ADD THIS: Map channel to player
+                channelToPlayerId[channelIndex] = pawnPlayerId;
+
                 LogVerbose($"✓ LINKED PAWN: Actor {pawnActorGuid.Value} -> Player {pawnPlayerId}");
             }
         }
@@ -1726,9 +3140,31 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             LogVerbose($"⚠️ Could not identify player for pawn");
         }
 
+        // ✅ Track activity AFTER we've populated channelToPlayerId
+        if (!string.IsNullOrEmpty(pawnPlayerId))
+        {
+            channelToPlayerId[channelIndex] = pawnPlayerId;
+            LogVerbose($"✅ MAPPED PAWN CHANNEL: {channelIndex} → Player {pawnPlayerId}");
+
+            var currentTime = (float) Builder.GetCurrentTimeDouble();
+            lastChannelActivityTime[channelIndex] = currentTime;
+            mostRecentActiveChannel = channelIndex;
+            LogVerbose($"🎯 Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
+        }
+
+        LogVerbose($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
+        // ✅ ONLY track activity AFTER we know this is a valid player
+        if (!string.IsNullOrEmpty(pawnPlayerId))
+        {
+            var currentTime = (float) Builder.GetCurrentTimeDouble();
+            lastChannelActivityTime[channelIndex] = currentTime;
+            mostRecentActiveChannel = channelIndex;
+            LogVerbose($"✓ Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
+        }
+
         LogVerbose($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
 
-        // === NEW: Check for PawnUniqueID and map it ===
+        // Check for PawnUniqueID and map it
         var pawnType = pawn.GetType();
         var pawnIdProp = pawnType.GetProperty("PawnUniqueID");
 
@@ -1739,7 +3175,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 var pawnUniqueId = pawnIdProp.GetValue(pawn);
                 LogVerbose($"PawnUniqueID: {pawnUniqueId} (Type: {pawnIdProp.PropertyType.Name})");
 
-                // Try to convert it to short and map it
                 if (pawnUniqueId != null && !string.IsNullOrEmpty(pawnPlayerId))
                 {
                     short persistentId = 0;
@@ -1773,7 +3208,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                             persistentIdToPlayerId[persistentId] = pawnPlayerId;
                             LogVerbose($"✓ Mapped PawnUniqueID {persistentId} -> Player {pawnPlayerId}");
 
-                            // Also try to get Epic ID for complete mapping
                             if (playerIdToEpicId.TryGetValue(pawnPlayerId, out var epicId))
                             {
                                 LogVerbose($"  └─ Epic ID: {epicId}");
@@ -1803,7 +3237,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         {
             LogVerbose($"⚠ PawnUniqueID property not found");
         }
-        // === END PawnUniqueID mapping ===
 
         // Track player position for build ownership
         if (!string.IsNullOrEmpty(pawnPlayerId))
@@ -1811,14 +3244,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             Vector3 position = default;
             bool hasPosition = false;
 
-            // Try to get position from Location first
             if (pawn.Location != null)
             {
                 position = new Vector3((float) pawn.Location.X, (float) pawn.Location.Y, (float) pawn.Location.Z);
                 hasPosition = true;
                 LogVerbose($"✓ Got position from pawn.Location: {position}");
             }
-            // Fallback to ReplicatedMovement
             else if (pawn.ReplicatedMovement.HasValue && pawn.ReplicatedMovement.Value.Location != null)
             {
                 var loc = pawn.ReplicatedMovement.Value.Location;
@@ -1828,7 +3259,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
             else
             {
-                LogVerbose($"⚠️ No position data available (Location: {pawn.Location != null}, ReplicatedMovement: {pawn.ReplicatedMovement.HasValue})");
+                LogVerbose($"⚠️ No position data available");
             }
 
             if (hasPosition)
@@ -1863,7 +3294,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         AnalyzeForStats(pawn, "PlayerPawn", channelIndex, pawnPlayerId);
     }
-
     private FVector? GetBuildLocation(uint channelIndex)
     {
         var channel = Channels[channelIndex];
@@ -1993,6 +3423,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private void ProcessDamage(BatchedDamageCues damageCues, uint channelIndex)
     {
+        // ✅ FILTER 1: Only process if there's actual damage
+        if (!damageCues.Magnitude.HasValue || damageCues.Magnitude.Value <= 0)
+        {
+            return; // Skip 0 damage or null damage
+        }
+
         var attackerChannel = Channels[channelIndex];
         string? attackerPlayerId = null;
         if (attackerChannel?.Actor?.ActorNetGUID != null)
@@ -2007,11 +3443,60 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             actorGuidToPlayerId.TryGetValue(damageCues.HitActor.Value, out victimPlayerId);
         }
 
-        if (!string.IsNullOrEmpty(attackerPlayerId) && !string.IsNullOrEmpty(victimPlayerId))
+        // ✅ FILTER 2: Must have both attacker and victim
+        if (string.IsNullOrEmpty(attackerPlayerId) || string.IsNullOrEmpty(victimPlayerId))
         {
-            uint? damageAmount = damageCues.Magnitude.HasValue ? (uint) damageCues.Magnitude.Value : null;
-            DamageTracker.RecordDamage(attackerPlayerId, victimPlayerId, damageAmount, false);
+            return;
         }
+
+        // ✅ FILTER 3: Can't damage yourself
+        if (attackerPlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // ✅ FILTER 4: Get player data and check if they're real players
+        var allPlayers = Builder.GetAllPlayers().ToList();
+        var attackerPlayer = allPlayers.FirstOrDefault(p =>
+            p.PlayerId.Equals(attackerPlayerId, StringComparison.OrdinalIgnoreCase));
+        var victimPlayer = allPlayers.FirstOrDefault(p =>
+            p.PlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase));
+
+        // Both must exist and both must not be bots
+        if (attackerPlayer == null || victimPlayer == null)
+        {
+            return;
+        }
+
+        if (attackerPlayer.IsBot || victimPlayer.IsBot)
+        {
+            return;
+        }
+
+        // ✅ FILTER 5: Check for valid player names (not equal to their ID)
+        if (string.IsNullOrEmpty(attackerPlayer.PlayerName) ||
+            string.IsNullOrEmpty(victimPlayer.PlayerName))
+        {
+            return;
+        }
+
+        if (attackerPlayer.PlayerName.Equals(attackerPlayer.PlayerId, StringComparison.OrdinalIgnoreCase) ||
+            victimPlayer.PlayerName.Equals(victimPlayer.PlayerId, StringComparison.OrdinalIgnoreCase))
+        {
+            return; // Likely a fake/system player
+        }
+
+        // ✅ FILTER 6: Team check - don't count team damage
+        if (attackerPlayer.TeamIndex == victimPlayer.TeamIndex && attackerPlayer.TeamIndex > 0)
+        {
+            return; // Same team
+        }
+
+        // ✅ ALL FILTERS PASSED - Record the damage
+        uint damageAmount = (uint) damageCues.Magnitude.Value;
+        DamageTracker.RecordDamage(attackerPlayerId, victimPlayerId, damageAmount, false);
+
+        LogVerbose($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
     }
 
     private void AnalyzeForStats(object obj, string typeName, uint channelIndex, string? playerId = null)
@@ -2161,13 +3646,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
 
         // Print all unique export types at the end
-        Console.WriteLine("\n=== ALL EXPORT TYPES SEEN ===");
+        LogVerbose("\n=== ALL EXPORT TYPES SEEN ===");
         foreach (var type in allExportTypes.OrderBy(t => t))
         {
-            Console.WriteLine($"  {type}");
+            LogVerbose($"  {type}");
         }
-        Console.WriteLine($"Total unique types: {allExportTypes.Count}");
-        Console.WriteLine("=============================\n");
+        LogVerbose($"Total unique types: {allExportTypes.Count}");
+        LogVerbose("=============================\n");
     }
 
 
@@ -2208,6 +3693,80 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         }
     }
 
+    public virtual PlayerElimination ParseElimination(FArchive archive, Unreal.Core.Models.EventInfo info)
+    {
+        try
+        {
+            var elim = new PlayerElimination { Info = info };
+            var version = archive.ReadInt32();
+
+            //Console.WriteLine($"\n=== PARSING ELIMINATION ===");
+            //Console.WriteLine($"Version: {version}");
+
+            if (version >= 3)
+            {
+                archive.SkipBytes(1);
+
+                if (version >= 6)
+                {
+                    elim.EliminatedInfo.Rotation = archive.ReadFQuat();
+                    elim.EliminatedInfo.Location = archive.ReadFVector();
+                    elim.EliminatedInfo.Scale = archive.ReadFVector();
+                }
+
+                elim.EliminatorInfo.Rotation = archive.ReadFQuat();
+                elim.EliminatorInfo.Location = archive.ReadFVector();
+                elim.EliminatorInfo.Scale = archive.ReadFVector();
+            }
+            else
+            {
+                if (Major <= 4 && Minor < 2)
+                {
+                    archive.SkipBytes(8);
+                }
+                else if (Major == 4 && Minor <= 2)
+                {
+                    archive.SkipBytes(36);
+                }
+            }
+
+            if ((int) archive.EngineNetworkVersion >= 34)
+            {
+                archive.SkipBytes(80);
+            }
+
+            //Console.WriteLine($"Parsing eliminated player...");
+            var eliminatedPosStart = archive.Position;
+            ParsePlayer(archive, elim.EliminatedInfo, version);
+            var eliminatedBytesRead = archive.Position - eliminatedPosStart;
+            //Console.WriteLine($"  Eliminated: '{elim.EliminatedInfo.Id}' (Type: {elim.EliminatedInfo.PlayerType}) - Read {eliminatedBytesRead} bytes");
+
+            //Console.WriteLine($"Parsing eliminator...");
+            var eliminatorPosStart = archive.Position;
+            ParsePlayer(archive, elim.EliminatorInfo, version);
+            var eliminatorBytesRead = archive.Position - eliminatorPosStart;
+            //Console.WriteLine($"  Eliminator: '{elim.EliminatorInfo.Id}' (Type: {elim.EliminatorInfo.PlayerType}) - Read {eliminatorBytesRead} bytes");
+
+            elim.GunType = archive.ReadByte();
+            elim.Knocked = archive.ReadUInt32AsBoolean();
+            elim.Time = info.StartTime.MillisecondsToTimeStamp();
+
+            LogVerbose($"GunType: {elim.GunType}, Knocked: {elim.Knocked}");
+            LogVerbose($"========================\n");
+
+            return elim;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Error while parsing PlayerElimination at timestamp {}", info?.StartTime);
+            throw new PlayerEliminationException($"Error while parsing PlayerElimination at timestamp {info?.StartTime}", ex);
+        }
+    }
+
+
+
+
+
     public override void ReadReplayHeader(FArchive archive)
     {
         base.ReadReplayHeader(archive);
@@ -2226,6 +3785,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             SizeInBytes = archive.ReadInt32()
         };
 
+        LogVerbose($"\n📅 EVENT: {info.Group}/{info.Metadata} at {info.StartTime}ms");
+
         var eventKey = $"{info.Group}/{info.Metadata}";
         if (!uniqueEvents.ContainsKey(eventKey))
         {
@@ -2237,56 +3798,263 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         if (info.Group == ReplayEventTypes.PLAYER_ELIMINATION)
         {
-            var elimination = ParseElimination(decryptedArchive, info);
-            Replay.Eliminations.Add(elimination);
-
-            var attackerId = elimination.EliminatorInfo?.Id;
-            var victimId = elimination.EliminatedInfo?.Id;
-
-            if (!string.IsNullOrEmpty(attackerId))
+            try
             {
-                var attackerStats = DamageTracker.GetOrCreatePlayerStats(attackerId);
-                attackerStats.Eliminations++;
+                ParseAndStoreEliminationEvent(decryptedArchive, info);
             }
-
-            if (!string.IsNullOrEmpty(victimId))
+            catch (Exception ex)
             {
-                var victimStats = DamageTracker.GetOrCreatePlayerStats(victimId);
-                victimStats.Deaths++;
+                Console.WriteLine($"❌ Error parsing elimination event: {ex.Message}");
             }
-            return;
-        }
-        else if (info.Metadata == ReplayEventTypes.MATCH_STATS)
-        {
-            var playerStats = ParseMatchStats(decryptedArchive, info);
-            AllPlayerStats.Add(playerStats);
-            LogVerbose($"*** MATCH STATS EVENT #{AllPlayerStats.Count} ***");
-            LogVerbose($"MaterialsGathered: {playerStats.MaterialsGathered}");
-            LogVerbose($"MaterialsUsed: {playerStats.MaterialsUsed}");
-            LogVerbose($"TotalTraveled: {playerStats.TotalTraveled}");
-            LogVerbose($"Assists: {playerStats.Assists}");
-
-            Replay.Stats = playerStats;
-            return;
-        }
-        else if (info.Metadata == ReplayEventTypes.TEAM_STATS)
-        {
-            Replay.TeamStats = ParseTeamStats(decryptedArchive, info);
-            return;
-        }
-        else if (info.Metadata == ReplayEventTypes.ENCRYPTION_KEY)
-        {
-            ParseEncryptionKeyEvent(decryptedArchive, info);
-            return;
-        }
-
-        if (IsDebugMode)
-        {
-            throw new UnknownEventException(
-                $"Unknown event {info.Group} ({info.Metadata}) of size {info.SizeInBytes}"
-            );
         }
     }
+
+    /// <summary>
+    /// Parse a player elimination event and store it
+    /// </summary>
+    private void ParseAndStoreEliminationEvent(FArchive archive, Unreal.Core.Models.EventInfo info)
+    {
+        var version = archive.ReadInt32();
+
+        if (version >= 3)
+        {
+            archive.SkipBytes(1);
+
+            if (version >= 6)
+            {
+                archive.ReadFQuat();  // EliminatedInfo.Rotation
+                archive.ReadFVector();  // EliminatedInfo.Location
+                archive.ReadFVector();  // EliminatedInfo.Scale
+            }
+
+            archive.ReadFQuat();  // EliminatorInfo.Rotation
+            archive.ReadFVector();  // EliminatorInfo.Location
+            archive.ReadFVector();  // EliminatorInfo.Scale
+        }
+        else
+        {
+            if (Major <= 4 && Minor < 2)
+            {
+                archive.SkipBytes(8);
+            }
+            else if (Major == 4 && Minor <= 2)
+            {
+                archive.SkipBytes(36);
+            }
+        }
+
+        if ((int) archive.EngineNetworkVersion >= 34)
+        {
+            archive.SkipBytes(80);
+        }
+
+        // Parse eliminated player
+        var eliminatedInfo = new PlayerEliminationInfo();
+        ParsePlayer(archive, eliminatedInfo, version);
+
+        // Parse eliminator
+        var eliminatorInfo = new PlayerEliminationInfo();
+        ParsePlayer(archive, eliminatorInfo, version);
+
+        var gunType = archive.ReadByte();
+        var knocked = archive.ReadUInt32AsBoolean();
+        var time = info.StartTime / 1000.0;  // Convert ms to seconds
+
+        _parsedEliminations.Add((
+      eliminatedId: eliminatedInfo.Id ?? "Unknown",
+      eliminatorId: eliminatorInfo.Id ?? "Unknown",
+      time: time,
+      knocked: knocked
+  ));
+    }
+
+
+    void LogObject(string label, object obj, int indent = 0)
+    {
+        string indentStr = new string(' ', indent);
+
+        if (obj == null)
+        {
+            Console.WriteLine($"{indentStr}{label}: null");
+            return;
+        }
+
+        Type type = obj.GetType();
+        Console.WriteLine($"{indentStr}{label}: {type.Name}");
+
+        // Log all public properties
+        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            object value = null;
+            try { value = prop.GetValue(obj); } catch { }
+
+            if (value == null)
+            {
+                Console.WriteLine($"{indentStr}    {prop.Name}: null");
+            }
+            else if (prop.PropertyType.IsPrimitive || prop.PropertyType == typeof(string))
+            {
+                Console.WriteLine($"{indentStr}    {prop.Name}: {value}");
+            }
+            else
+            {
+                // Recursively log nested objects
+                LogObject(prop.Name, value, indent + 4);
+            }
+        }
+
+        // Log all public fields (if any)
+        foreach (var field in type.GetFields(BindingFlags.Public | BindingFlags.Instance))
+        {
+            object value = null;
+            try { value = field.GetValue(obj); } catch { }
+
+            if (value == null)
+            {
+                Console.WriteLine($"{indentStr}    {field.Name}: null");
+            }
+            else if (field.FieldType.IsPrimitive || field.FieldType == typeof(string))
+            {
+                Console.WriteLine($"{indentStr}    {field.Name}: {value}");
+            }
+            else
+            {
+                LogObject(field.Name, value, indent + 4);
+            }
+        }
+    }
+
+    private void ParseSessionMContent(FArchive archive)
+    {
+        LogVerbose("\n === PARSING SESSION M CONTENT === ");
+
+        try
+        {
+            // SessionM is likely a serialized UObject or TArray
+            // Try different parsing strategies
+
+            // Strategy 1: Try as TArray of key-value pairs
+            archive.Seek(0, System.IO.SeekOrigin.Begin);
+            var count = archive.ReadInt32();
+            LogVerbose($"First int32: {count}");
+
+            if (count > 0 && count < 10000)
+            {
+                LogVerbose($"Attempting to read as array of {count} elements...\n");
+
+                for (int i = 0; i < Math.Min(count, 100); i++) // Limit to 100 for safety
+                {
+                    try
+                    {
+                        // Try reading as FString key-value pair
+                        var key = archive.ReadFString();
+
+                        if (string.IsNullOrEmpty(key) || key.Length > 200)
+                        {
+                            LogVerbose($"[{i}] Invalid key, stopping parse");
+                            break;
+                        }
+
+                        // Try to determine value type
+                        // Could be FString, int32, float, etc.
+                        var valueLength = archive.ReadInt32();
+
+                        if (valueLength < 0)
+                        {
+                            // Negative means Unicode string
+                            valueLength = -valueLength;
+                            var valueBytes = archive.ReadBytes(valueLength * 2);
+                            var value = System.Text.Encoding.Unicode.GetString(valueBytes.ToArray()).TrimEnd('\0');
+                            LogVerbose($"[{i}] {key} = \"{value}\" (UTF-16)");
+                        }
+                        else if (valueLength > 0 && valueLength < 1000)
+                        {
+                            // Positive means ASCII string
+                            var valueBytes = archive.ReadBytes(valueLength);
+                            var value = System.Text.Encoding.ASCII.GetString(valueBytes.ToArray()).TrimEnd('\0');
+                            LogVerbose($"[{i}] {key} = \"{value}\" (ASCII)");
+                        }
+                        else if (valueLength == 0)
+                        {
+                            // Empty string or might be a numeric value
+                            // Try reading as different types
+                            LogVerbose($"[{i}] {key} = (empty or different type)");
+                        }
+                        else
+                        {
+                            LogVerbose($"[{i}] {key} = (unknown type, length={valueLength})");
+                            // Skip this entry
+                            archive.Seek(Math.Min(valueLength, 1000), System.IO.SeekOrigin.Current);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogVerbose($"[{i}] Parse error: {ex.Message}");
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                LogVerbose("First int32 doesn't look like a valid array count");
+
+                // Strategy 2: Scan for strings
+                LogVerbose("\n=== SCANNING FOR STRINGS ===");
+                archive.Seek(0, System.IO.SeekOrigin.Begin);
+
+                // Read a reasonable buffer size - adjust as needed
+                var bufferSize = 10 * 1024 * 1024; // 10MB max
+                var allBytes = archive.ReadBytes(bufferSize);
+
+                var strings = new List<(int offset, string text)>();
+                var currentString = new List<char>();
+                int stringStart = 0;
+
+                for (int i = 0; i < allBytes.Length; i++)
+                {
+                    var b = allBytes[i]; // Direct indexing on ReadOnlySpan<byte>
+
+                    if (b >= 32 && b < 127) // Printable ASCII
+                    {
+                        if (currentString.Count == 0)
+                            stringStart = i;
+                        currentString.Add((char) b);
+                    }
+                    else
+                    {
+                        if (currentString.Count >= 4)
+                        {
+                            strings.Add((stringStart, new string(currentString.ToArray())));
+                        }
+                        currentString.Clear();
+                    }
+                }
+
+                LogVerbose($"Found {strings.Count} readable strings");
+                LogVerbose("\nFirst 50 strings:");
+                foreach (var (offset, text) in strings.Take(50))
+                {
+                    LogVerbose($"  @{offset:X6}: {text}");
+                }
+
+                // Look for JSON
+                var fullText = System.Text.Encoding.ASCII.GetString(allBytes.ToArray(), 0, allBytes.Length);
+                var jsonStart = fullText.IndexOf('{');
+                if (jsonStart >= 0)
+                {
+                    LogVerbose($"\n[!] Found potential JSON at offset {jsonStart}");
+                    var jsonSnippet = fullText.Substring(jsonStart, Math.Min(500, fullText.Length - jsonStart));
+                    LogVerbose($"Preview: {jsonSnippet}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            LogVerbose($"ParseSessionMContent error: {ex.Message}");
+            LogVerbose(ex.StackTrace);
+        }
+    }
+
 
     public void PrintEventSummary()
     {
@@ -2344,77 +4112,54 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         TotalTraveled = archive.ReadUInt32()
     };
 
-    public virtual PlayerElimination ParseElimination(FArchive archive, Unreal.Core.Models.EventInfo info)
-    {
-        try
-        {
-            var elim = new PlayerElimination { Info = info };
-            var version = archive.ReadInt32();
-
-            if (version >= 3)
-            {
-                archive.SkipBytes(1);
-
-                if (version >= 6)
-                {
-                    elim.EliminatedInfo.Rotation = archive.ReadFQuat();
-                    elim.EliminatedInfo.Location = archive.ReadFVector();
-                    elim.EliminatedInfo.Scale = archive.ReadFVector();
-                }
-
-                elim.EliminatorInfo.Rotation = archive.ReadFQuat();
-                elim.EliminatorInfo.Location = archive.ReadFVector();
-                elim.EliminatorInfo.Scale = archive.ReadFVector();
-            }
-            else
-            {
-                if (Major <= 4 && Minor < 2)
-                {
-                    archive.SkipBytes(8);
-                }
-                else if (Major == 4 && Minor <= 2)
-                {
-                    archive.SkipBytes(36);
-                }
-            }
-
-            if ((int) archive.EngineNetworkVersion >= 34)
-            {
-                archive.SkipBytes(80);
-            }
-
-            ParsePlayer(archive, elim.EliminatedInfo, version);
-            ParsePlayer(archive, elim.EliminatorInfo, version);
-
-            elim.GunType = archive.ReadByte();
-            elim.Knocked = archive.ReadUInt32AsBoolean();
-            elim.Time = info.StartTime.MillisecondsToTimeStamp();
-            return elim;
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "Error while parsing PlayerElimination at timestamp {}", info?.StartTime);
-            throw new PlayerEliminationException($"Error while parsing PlayerElimination at timestamp {info?.StartTime}", ex);
-        }
-    }
 
     public virtual void ParsePlayer(FArchive archive, PlayerEliminationInfo info, int version)
     {
+        var startPos = archive.Position;
+
         if (version < 6)
         {
             info.Id = archive.ReadFString();
+            LogVerbose($"    [v<6] Read FString: '{info.Id}'");
             return;
         }
 
-        info.PlayerType = archive.ReadByteAsEnum<PlayerTypes>();
-        info.Id = info.PlayerType switch
+        // Read the type byte
+        var typeByte = archive.ReadByte();
+        info.PlayerType = (PlayerTypes) typeByte;
+
+        LogVerbose($"    [v>=6] Type byte: {typeByte} ({info.PlayerType})");
+
+        switch (info.PlayerType)
         {
-            PlayerTypes.BOT => "Bot",
-            PlayerTypes.NAMED_BOT => archive.ReadFString(),
-            PlayerTypes.PLAYER => archive.ReadGUID(archive.ReadByte()),
-            _ => ""
-        };
+            case PlayerTypes.BOT:
+                info.Id = "Bot";
+                break;
+
+            case PlayerTypes.NAMED_BOT:
+                var name = archive.ReadFString();
+                LogVerbose($"      NAMED_BOT read: '{name}'");
+                info.Id = name;
+                break;
+
+            case PlayerTypes.PLAYER:
+                var guidSize = archive.ReadByte();
+                var guid = archive.ReadGUID(guidSize);
+                LogVerbose($"      PLAYER GUID (size {guidSize}): {guid}");
+                info.Id = guid;
+                break;
+
+            default:
+                LogVerbose($"      UNKNOWN TYPE: {typeByte}");
+                info.Id = $"UNKNOWN_{typeByte}";
+                break;
+        }
+
+        var bytesRead = archive.Position - startPos;
+        LogVerbose($"    Total bytes read for player: {bytesRead}");
     }
+
+
 
     protected override FArchive DecryptBuffer(FArchive archive, int size)
     {
@@ -2507,44 +4252,57 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var headers = new List<string>
     {
         "ReplayID", "EpicID", "PlayerName",
+        "Eliminations", "WasRebooted",
         "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
         "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
-        "Eliminations", "DamageDealt", "DamageTaken", "ShotsHit",
+        "DamageDealt", "DamageTaken", "ShotsHit",
         "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions"
     };
 
         csvLines.Add(string.Join(",", headers));
 
-        // Use case-insensitive HashSet to avoid duplicates
         var allPlayerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         allPlayerIds.UnionWith(playerRealtimeStats.Keys);
         allPlayerIds.UnionWith(DamageTracker.PlayerStats.Keys);
         allPlayerIds.UnionWith(HarvestTracker.GetAllPlayerStats().Keys);
         allPlayerIds.UnionWith(BuildTracker.GetAllPlayerStats().Keys);
+        // ✅ IMPORTANT: Also include players from elimination tracking
+        allPlayerIds.UnionWith(Builder.GetAllEliminationCounts().Keys);
 
-        Console.WriteLine($"Processing {allPlayerIds.Count} unique players...");
+        LogVerbose($"Processing {allPlayerIds.Count} unique players...");
 
         foreach (var playerId in allPlayerIds)
         {
             var row = new List<string> { replayId, playerId.ToLower() };
 
-            // Get player name from replay data
             var playerName = GetPlayerNameFromReplay(playerId);
-
-            // Only add player name if it's different from the player ID
             if (!string.IsNullOrEmpty(playerName) && !playerName.Equals(playerId, StringComparison.OrdinalIgnoreCase))
             {
                 row.Add($"\"{playerName}\"");
             }
             else
             {
-                row.Add("\"\""); // Empty name if same as ID
+                row.Add("\"\"");
             }
 
-            // Get build stats from BuildTracker
-            var buildStats = BuildTracker.GetPlayerStats(playerId);
+            //var finalAthenaKills = ExtractFinalAthenaKills();
 
-            // Build stats
+            // ✅ Use KillScore from Builder (source of truth from replay) instead of kill feed parsing
+            var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId)
+    ? Builder.GetEliminationCounts()[playerId]
+    : 0;
+            // ✅ Add eliminations/reboot FIRST (matches headers order)
+            var eliminations_OG = Builder.GetFinalKillScores().ContainsKey(playerId)
+                ? Builder.GetFinalKillScores()[playerId]
+
+
+                : 0;
+            var wasRebooted = Builder.WasPlayerRebooted(playerId) ? 1 : 0;
+            row.Add(eliminations.ToString());
+            row.Add(wasRebooted.ToString());
+
+            // ✅ Then add builds
+            var buildStats = BuildTracker.GetPlayerStats(playerId);
             row.Add(buildStats.TotalBuildsPlaced.ToString());
             row.Add(buildStats.WoodBuilds.ToString());
             row.Add(buildStats.StoneBuilds.ToString());
@@ -2556,17 +4314,15 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             row.Add(buildStats.BuildsEdited.ToString());
             row.Add(buildStats.BuildsDestroyed.ToString());
 
-            // Combat stats from DamageTracker
+            // ✅ Then add damage
             var damageStats = DamageTracker.PlayerStats.ContainsKey(playerId)
                 ? DamageTracker.PlayerStats[playerId]
                 : null;
-
-            row.Add(damageStats?.Eliminations.ToString() ?? "0");
             row.Add(damageStats?.TotalDamageDealt.ToString() ?? "0");
             row.Add(damageStats?.TotalDamageTaken.ToString() ?? "0");
             row.Add(damageStats?.ShotsHit.ToString() ?? "0");
 
-            // Harvest stats from HarvestTracker (only harvesting, not collection)
+            // ✅ Finally add harvest
             var harvestStats = HarvestTracker.GetPlayerStats(playerId);
             row.Add(harvestStats.TotalMaterialsHarvested.ToString());
             row.Add(harvestStats.WoodHarvested.ToString());
@@ -2578,9 +4334,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         }
 
         await File.WriteAllLinesAsync(filePath, csvLines);
-        Console.WriteLine($"\n*** CSV exported to: {filePath} ***");
-        Console.WriteLine($"*** Exported {allPlayerIds.Count} unique players with {headers.Count} columns ***");
+        LogVerbose($"\n*** CSV exported to: {filePath} ***");
+        LogVerbose($"*** Exported {allPlayerIds.Count} unique players with {headers.Count} columns ***");
     }
+
+
+
+
 
     private string GetPlayerNameFromReplay(string playerId)
     {

@@ -13,7 +13,6 @@ public class FortPlayerStateCache
     public OnNewLevel Client_OnNewLevel { get; set; }
 }
 
-
 [NetFieldExportGroup("/Script/FortniteGame.FortPlayerStateAthena", minimalParseMode: ParseMode.Minimal)]
 public class FortPlayerState : INetFieldExportGroup
 {
@@ -143,6 +142,37 @@ public class FortPlayerState : INetFieldExportGroup
     [NetFieldExport("bDidNotThankBusDriver", RepLayoutCmdType.PropertyBool)]
     public bool? bDidNotThankBusDriver { get; set; }
 
+    // MISSING PROPERTIES - Added to fix deserialization
+    [NetFieldExport("bRepFlag1", RepLayoutCmdType.PropertyBool)]
+    public bool? bRepFlag1 { get; set; }
+
+    [NetFieldExport("CachedLoadoutCharacterUngated", RepLayoutCmdType.PropertyUInt16)]
+    public ushort? CachedLoadoutCharacterUngated { get; set; }
+
+    [NetFieldExport("GatingRandomHash", RepLayoutCmdType.PropertyUInt32)]
+    public uint? GatingRandomHash { get; set; }
+
+    [NetFieldExport("SoftParts", RepLayoutCmdType.DynamicArray)]
+    public ItemDefinition[] SoftParts { get; set; }
+
+    [NetFieldExport("RequestedSoftCharacterParts", RepLayoutCmdType.DynamicArray)]
+    public ItemDefinition[] RequestedSoftCharacterParts { get; set; }
+
+    [NetFieldExport("PlayerTeam", RepLayoutCmdType.Property)]
+    public ItemDefinition PlayerTeam { get; set; }
+
+    [NetFieldExport("SquadID", RepLayoutCmdType.PropertyByte)]
+    public byte? SquadID { get; set; }
+
+    [NetFieldExport("bShowingSeasonLevel", RepLayoutCmdType.PropertyBool)]
+    public bool? bShowingSeasonLevel { get; set; }
+
+    [NetFieldExport("InitialSquadSize", RepLayoutCmdType.PropertyByte)]
+    public byte? InitialSquadSize { get; set; }
+
+    [NetFieldExport("AthenaKills", RepLayoutCmdType.PropertyUInt32)]
+    public uint? AthenaKills { get; set; }
+
     [NetFieldExport("TeamKillScore", RepLayoutCmdType.PropertyUInt32)]
     public uint? TeamKillScore { get; set; }
 
@@ -253,4 +283,35 @@ public class FortPlayerState : INetFieldExportGroup
 
     [NetFieldExport("bHidden", RepLayoutCmdType.Ignore)]
     public bool? bHidden { get; set; }
+
+    // Additional missing properties from error log
+    [NetFieldExport("LocalSpecialActorData", RepLayoutCmdType.Ignore)]
+    public uint? LocalSpecialActorData { get; set; }
+
+    [NetFieldExport("DeathServerTime", RepLayoutCmdType.PropertyUInt32)]
+    public uint? DeathServerTime { get; set; }
+
+    [NetFieldExport("DeathRotation", RepLayoutCmdType.PropertyRotator)]
+    public FRotator? DeathRotation { get; set; }
+
+    [NetFieldExport("KeepPlayingTogetherVotingStatus", RepLayoutCmdType.Enum)]
+    public int? KeepPlayingTogetherVotingStatus { get; set; }
+
+    [NetFieldExport("KeepPlayingTogetherMatchmakingRegion", RepLayoutCmdType.PropertyUInt64)]
+    public ulong? KeepPlayingTogetherMatchmakingRegion { get; set; }
+
+    [NetFieldExport("bRespawningFromRespawnData", RepLayoutCmdType.PropertyBool)]
+    public bool? bRespawningFromRespawnData { get; set; }
+
+    [NetFieldExport("InteractingRebootVan", RepLayoutCmdType.Ignore)]
+    public ushort? InteractingRebootVan { get; set; }
+
+    [NetFieldExport("bActiveBeingRebooted", RepLayoutCmdType.PropertyBool)]
+    public bool? bActiveBeingRebooted { get; set; }
+
+    [NetFieldExport("TeamAverageDamageDealt", RepLayoutCmdType.PropertyUInt16)]
+    public ushort? TeamAverageDamageDealt { get; set; }
+
+    [NetFieldExport("StormSurgeEffectCount", RepLayoutCmdType.PropertyByte)]
+    public byte? StormSurgeEffectCount { get; set; }
 }

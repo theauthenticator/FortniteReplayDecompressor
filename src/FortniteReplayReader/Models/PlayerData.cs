@@ -26,6 +26,8 @@ public class PlayerData
         HasStartedPlaying = playerState.bHasStartedPlaying;
         IsUsingAnonymousMode = playerState.bUsingAnonymousMode;
         IsUsingStreamerMode = playerState.bUsingStreamerMode;
+        Kills = playerState.KillScore;
+        TeamKills = playerState.TeamKillScore;
 
         Cosmetics = new Cosmetics()
         {

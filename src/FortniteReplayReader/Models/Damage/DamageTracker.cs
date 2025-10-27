@@ -90,8 +90,6 @@ public class DamageTracker
         else
             attackerStats.TotalHealthDamageDealt += damageEvent.Amount;
 
-        if (damageEvent.IsFatal)
-            attackerStats.Eliminations++;
 
         // Update victim stats if we can identify them
         if (victimId != null)
@@ -106,6 +104,7 @@ public class DamageTracker
                 victimStats.TotalHealthDamageTaken += damageEvent.Amount;
         }
     }
+
 
     public PlayerDamageStats GetOrCreatePlayerStats(string playerId)
 
@@ -143,14 +142,12 @@ public class DamageTracker
         attackerStats.TotalDamageDealt += damage.Value;
         attackerStats.ShotsHit++;
 
-        if (isFatal == true)
-            attackerStats.Eliminations++;
 
         // Update victim stats
         victimStats.DamageTaken.Add(damageEvent);
         victimStats.TotalDamageTaken += damage.Value;
 
-        Console.WriteLine($"💥 {attacker} dealt {damage} damage to {victim}{(isFatal == true ? " (ELIMINATION)" : "")}");
+       // Console.WriteLine($"💥 {attacker} dealt {damage} damage to {victim}{(isFatal == true ? " (ELIMINATION)" : "")}");
     }
 
     public void PrintSummary()

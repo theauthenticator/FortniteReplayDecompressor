@@ -12,6 +12,9 @@ public class KillFeedEntry
     public int? FinisherOrDowner { get; set; }
     public string? FinisherOrDownerName { get; set; }
     public bool FinisherOrDownerIsBot { get; set; }
+    
+    // ADD THIS - Store the raw actor ID from FortPlayerState
+    public uint? FinisherOrDownerActorId { get; set; }
 
     public float? ReplicatedWorldTimeSeconds { get; set; }
     public double? ReplicatedWorldTimeSecondsDouble { get; set; }

@@ -16,7 +16,13 @@ namespace Unreal.Core;
 /// <typeparam name="T"></typeparam>
 public abstract class ReplayReader<T> where T : Replay, new()
 {
-    /// <summary>
+
+    private bool _logAnything = false;
+
+    
+
+
+    /// <summary> 
     /// const int32 UNetConnection::DEFAULT_MAX_CHANNEL_SIZE = 32767; 
     /// see https://github.com/EpicGames/UnrealEngine/blob/70bc980c6361d9a7d23f6d23ffe322a2d6ef16fb/Engine/Source/Runtime/Engine/Private/NetConnection.cpp#L84
     /// </summary>
@@ -1682,11 +1688,11 @@ public abstract class ReplayReader<T> where T : Replay, new()
             {
                 if (field != null)
                 {
-                    _logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
+                    //_logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
                 }
                 else
                 {
-                    _logger?.LogWarning("   Export: <null>");
+                    // _logger?.LogWarning("   Export: <null>");
                 }
             }
         }
@@ -1702,7 +1708,7 @@ public abstract class ReplayReader<T> where T : Replay, new()
             {
                 if (field != null)
                 {
-                    _logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
+                    //_logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
                 }
             }
         }

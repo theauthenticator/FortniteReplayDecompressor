@@ -64,16 +64,16 @@ public class FortBroadcastRemoteClientInfo : INetFieldExportGroup
     [NetFieldExport("HitCount", RepLayoutCmdType.PropertyInt)]
     public int? HitCount { get; set; }
 
-    [NetFieldExportRPC("ClientRemotePlayerAddMapMarker", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerAddMapMarker", isFunction: true, enablePropertyChecksum: false)]
+    [NetFieldExportRPC("ClientRemotePlayerAddMapMarker", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerAddMapMarker", isFunction: true, enablePropertyChecksum: true)]
     public AddMapMarker AddMapMarker { get; set; }
 
-    [NetFieldExportRPC("ClientRemotePlayerRemoveMapMarker", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerRemoveMapMarker", isFunction: true, enablePropertyChecksum: false)]
+    [NetFieldExportRPC("ClientRemotePlayerRemoveMapMarker", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerRemoveMapMarker", isFunction: true, enablePropertyChecksum: true)]
     public RemoveMapMarker RemoveMapMarker { get; set; }
 
-    [NetFieldExportRPC("ClientRemotePlayerDamagedResourceBuilding", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", isFunction: true, enablePropertyChecksum: false)]
+    [NetFieldExportRPC("ClientRemotePlayerDamagedResourceBuilding", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", isFunction: true, enablePropertyChecksum: true)]
     public PlayerDamagedResourceBuilding PlayerDamagedResourceBuilding { get; set; }
 
-    [NetFieldExportRPC("", "", isFunction: true, enablePropertyChecksum: false)]
+    [NetFieldExportRPC("", "", isFunction: true, enablePropertyChecksum: true)]
     public object AnyRpc { get; set; }
 
 

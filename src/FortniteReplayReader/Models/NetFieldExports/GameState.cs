@@ -228,7 +228,7 @@ public class GameState : INetFieldExportGroup
     [NetFieldExport("bAllowUserPickedCosmeticBattleBus", RepLayoutCmdType.PropertyBool)]
     public bool? bAllowUserPickedCosmeticBattleBus { get; set; }
 
-    [NetFieldExport("TeamFlightPaths", RepLayoutCmdType.DynamicArray)]
+    [NetFieldExport("TeamFlightPaths", RepLayoutCmdType.Ignore)]
     public Aircraft[] TeamFlightPaths { get; set; }
 
     [NetFieldExport("StormCapState", RepLayoutCmdType.Enum)]
@@ -389,5 +389,27 @@ public class GameState : INetFieldExportGroup
 
     [NetFieldExport("RealMatchStartTime", RepLayoutCmdType.PropertyDouble)]
     public double RealMatchStartTime { get; set; }
+
+    [NetFieldExport("Mnemonic", RepLayoutCmdType.Ignore)]
+    public object Mnemonic { get; set; }
+
+    [NetFieldExport("Version", RepLayoutCmdType.Ignore)]
+    public object Version { get; set; }
+
+    [NetFieldExport("MatchmakingLinkType", RepLayoutCmdType.Ignore)]
+    public object MatchmakingLinkType { get; set; }
+
+
+    [NetFieldExport("BroadcastSpectatorInfo", RepLayoutCmdType.Ignore)]
+    public object BroadcastSpectatorInfo { get; set; }
+
+    [NetFieldExport("AICharacterPartsPreloadData", RepLayoutCmdType.Ignore)]
+    public object AICharacterPartsPreloadData { get; set; }
+
+    [NetFieldExport("bIsTournamentMatch", RepLayoutCmdType.Ignore)]
+    public bool? bIsTournamentMatch { get; set; }
+
+    [NetFieldExport("bDamageComboHUDEnabled", RepLayoutCmdType.Ignore)]
+    public bool? bDamageComboHUDEnabled { get; set; }
 
 }
