@@ -890,16 +890,20 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     /// Evaluate eliminations based on authoritative elimination events
     /// Track who knocked whom, credit knockers if their teammate is alive at elimination time
     /// </summary>
+    /// <summary>
+    /// Evaluate eliminations with complete Fortnite elimination credit logic
+    /// Clears stale knockers when players are revived
+    /// </summary>
     public Dictionary<string, int> EvaluateEliminationsFromEvents()
     {
-        Console.WriteLine($"\n≡ƒôì EVALUATING ELIMINATIONS FROM EVENTS (COMPLETE LOGIC):");
+        Console.WriteLine($"\n≡ƒôì EVALUATING ELIMINATIONS FROM EVENTS (WITH STALE KNOCKER CLEARING):");
         Console.WriteLine($"   Total eliminations to process: {_parsedEliminations.Count}\n");
 
         var mostRecentKnocker = new Dictionary<string, (string knockerId, double knockTime)>();
         var playerEliminatedTime = new Dictionary<string, double>();
         var playerRevives = GetPlayerRevivesAndReboots();
         var playerTeams = BuildPlayerTeamMap();
-        var playerReboots = GetValidatedReboots();  // NEW: Use validated reboots from state history
+        var playerReboots = GetValidatedReboots();
         var eliminationCredits = new Dictionary<string, int>();
 
         int creditedCount = 0;
@@ -916,14 +920,38 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
             if (knocked)
             {
+                // NEW: Ignore self-knockdowns (player knocked themselves)
+                if (eliminatorId == eliminatedId)
+                {
+                    Console.WriteLine($"   [{processedCount}] SELF-KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} (IGNORED - thirsted finish will get credit)");
+                    continue;  // Skip self-knocks, don't store as a valid knocker
+                }
+
+                // 🔴 KNOCKDOWN EVENT: Store this as the most recent knocker
                 mostRecentKnocker[eliminatedId] = (eliminatorId, time);
                 Console.WriteLine($"   [{processedCount}] KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
             }
             else
             {
+                // 🟢 ELIMINATION EVENT: Evaluate for credit
                 Console.WriteLine($"   [{processedCount}] ELIM @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
 
                 playerEliminatedTime[eliminatedId] = time;
+
+                // NEW: Clear stale knockers (knocked before a revive)
+                if (mostRecentKnocker.ContainsKey(eliminatedId) && playerRevives.ContainsKey(eliminatedId))
+                {
+                    var (knockerId, knockTime) = mostRecentKnocker[eliminatedId];
+                    var reviveTimes = playerRevives[eliminatedId];
+
+                    // If there's a revive after the knock but before this elim, clear the knocker
+                    var reviveAfterKnock = reviveTimes.FirstOrDefault(reviveTime => reviveTime > knockTime && reviveTime < time);
+                    if (reviveAfterKnock > 0)
+                    {
+                        Console.WriteLine($"      Cleared stale knocker: {GetPlayerNameFromReplay(knockerId)} @ {knockTime:F2}s (revived @ {reviveAfterKnock:F2}s)");
+                        mostRecentKnocker.Remove(eliminatedId);
+                    }
+                }
 
                 if (mostRecentKnocker.ContainsKey(eliminatedId))
                 {
@@ -1017,9 +1045,9 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         Console.WriteLine();
 
         PrintFinalCredits(eliminationCredits);
-
         return eliminationCredits;
     }
+
 
 
     private Dictionary<string, List<double>> GetValidatedReboots()
