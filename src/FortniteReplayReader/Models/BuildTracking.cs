@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Unreal.Core.Models;
+using FortniteReplayReader.Models.NetFieldExports.Vehicles;
 
 namespace FortniteReplayReader.Models
 {
@@ -17,6 +19,8 @@ namespace FortniteReplayReader.Models
         public int Health { get; set; }
         public uint? EditingPlayer { get; set; }
         public string ExportPath { get; set; }
+
+        public short? OwnerPersistentId { get; set; }
     }
 
     public class BuildStats
@@ -33,11 +37,25 @@ namespace FortniteReplayReader.Models
         public int BuildsEdited { get; set; }
     }
 
+
+    public class PendingBuild
+    {
+        public uint ChannelIndex { get; set; }
+        public BaseBuild Build { get; set; }
+        public string BuildTypeName { get; set; }
+        public string Material { get; set; }
+        public double GameTime { get; set; }
+    }
+
+
+
     public class BuildTracker
     {
         private Dictionary<string, List<PlayerBuildEvent>> playerBuilds = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, BuildStats> playerBuildStats = new(StringComparer.OrdinalIgnoreCase);
         private Dictionary<uint, string> actorToPlayer = new();
+
+        public List<PendingBuild> pendingBuilds = new();
 
         // Sanity check counters
         private int totalRecordBuildCalls = 0;
@@ -69,10 +87,15 @@ namespace FortniteReplayReader.Models
                 b.IsPlayerPlaced && !b.IsDestroyed);
         }
 
-        public void RecordBuild(uint actorId, string playerId, string exportPath,
-            bool isPlayerPlaced, bool isDestroyed, int teamIndex, int health,
-            uint? editingPlayer, float gameTime)
+     
+        /// <summary>
+        /// Primary overload - accepts material and buildType directly to avoid double-parsing
+        /// </summary>
+        public void RecordBuild(uint actorId, string playerId, string material, string buildType,
+    bool isPlayerPlaced, bool isDestroyed, int teamIndex, int health,
+    uint? editingPlayer, float gameTime, short? ownerPersistentId = null, string exportPath = "")
         {
+
             totalRecordBuildCalls++;
 
             if (!isPlayerPlaced)
@@ -81,11 +104,11 @@ namespace FortniteReplayReader.Models
                 return;
             }
 
-            var buildType = DetermineBuildType(exportPath);
-            var material = DetermineMaterial(exportPath);
-
             // Track unique export paths
-            uniqueExportPaths.Add(exportPath);
+            if (!string.IsNullOrEmpty(exportPath))
+            {
+                uniqueExportPaths.Add(exportPath);
+            }
 
             // Sanity check: Unknown build types or materials
             if (buildType == "Unknown")
@@ -93,7 +116,7 @@ namespace FortniteReplayReader.Models
                 unknownBuildTypes++;
                 if (unknownBuildTypes <= 3)
                 {
-                    Console.WriteLine($"[WARNING] Unknown build type for path: '{exportPath}'");
+                    Console.WriteLine($"[WARNING] Unknown build type: '{buildType}' (export path: '{exportPath}')");
                 }
             }
 
@@ -102,7 +125,7 @@ namespace FortniteReplayReader.Models
                 unknownMaterials++;
                 if (unknownMaterials <= 3)
                 {
-                    Console.WriteLine($"[WARNING] Unknown material for path: '{exportPath}'");
+                    Console.WriteLine($"[WARNING] Unknown material: '{material}' (export path: '{exportPath}')");
                 }
             }
 
@@ -136,7 +159,8 @@ namespace FortniteReplayReader.Models
                 TeamIndex = teamIndex,
                 Health = health,
                 EditingPlayer = editingPlayer,
-                ExportPath = exportPath
+                ExportPath = exportPath,
+                OwnerPersistentId = ownerPersistentId
             };
 
             // Always count as a new build placement
@@ -200,6 +224,30 @@ namespace FortniteReplayReader.Models
         {
             return playerBuildStats;
         }
+
+        public void PrintPlayerIdMappings()
+        {
+            Console.WriteLine("\n=== UNIQUE EPIC IDs, ACTOR IDs, AND OWNER PERSISTENT IDs ===");
+
+            var uniquePlayerIds = playerBuilds.Keys.OrderBy(x => x).ToList();
+            Console.WriteLine($"Total unique Epic IDs: {uniquePlayerIds.Count}\n");
+
+            foreach (var playerId in uniquePlayerIds)
+            {
+                var builds = playerBuilds[playerId];
+                var actorIds = builds.Select(b => b.ActorId).Distinct().OrderBy(x => x);
+                var persistentIds = builds.Where(b => b.OwnerPersistentId.HasValue)
+                    .Select(b => b.OwnerPersistentId.Value)
+                    .Distinct()
+                    .OrderBy(x => x);
+
+                Console.WriteLine($"Epic ID: {playerId}");
+                Console.WriteLine($"  Total builds: {builds.Count}");
+                Console.WriteLine($"  Actor IDs: {string.Join(", ", actorIds)}");
+                Console.WriteLine($"  Owner Persistent IDs: {string.Join(", ", persistentIds)}");
+            }
+        }
+
 
         public void PrintSanityChecks()
         {

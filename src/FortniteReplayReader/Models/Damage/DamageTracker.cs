@@ -18,10 +18,13 @@ public class DamageTracker
         ActorToPlayerId[actorId] = playerId;
     }
 
-    // Add this method to DamageTracker.cs
-    public void TrackHealthChange(string playerId, HealthSet oldHealth, HealthSet newHealth, float timeStamp)
+    // Add this method to DamageTracker.cs - UPDATED: Skip knocked/bot damage
+    public void TrackHealthChange(string playerId, HealthSet oldHealth, HealthSet newHealth, float timeStamp, bool isKnockedDown = false, bool isBot = false)
     {
         if (oldHealth == null || newHealth == null) return;
+
+        // NEW: Skip damage tracking for knocked players or bots
+        if (isKnockedDown || isBot) return;
 
         var stats = GetOrCreatePlayerStats(playerId);
 
@@ -56,10 +59,13 @@ public class DamageTracker
         }
     }
 
-    // Process damage from BatchedDamageCues
-    public void ProcessDamageCues(string attackerId, BatchedDamageCues cues, float timeStamp)
+    // Process damage from BatchedDamageCues - UPDATED: Skip knocked/bot damage
+    public void ProcessDamageCues(string attackerId, BatchedDamageCues cues, float timeStamp, bool attackerIsBot = false, bool victimIsKnockedDown = false, bool victimIsBot = false)
     {
         if (cues?.Magnitude == null || attackerId == null) return;
+
+        // NEW: Skip damage if attacker is bot or victim is knocked/bot
+        if (attackerIsBot || victimIsKnockedDown || victimIsBot) return;
 
         var attackerStats = GetOrCreatePlayerStats(attackerId);
         var victimId = GetPlayerIdFromActor(cues.HitActor);
@@ -90,9 +96,8 @@ public class DamageTracker
         else
             attackerStats.TotalHealthDamageDealt += damageEvent.Amount;
 
-
         // Update victim stats if we can identify them
-        if (victimId != null)
+        if (victimId != null && !victimIsBot && !victimIsKnockedDown)
         {
             var victimStats = GetOrCreatePlayerStats(victimId);
             victimStats.DamageTaken.Add(damageEvent);
@@ -105,24 +110,29 @@ public class DamageTracker
         }
     }
 
-
     public PlayerDamageStats GetOrCreatePlayerStats(string playerId)
-
-
     {
         if (!PlayerStats.ContainsKey(playerId))
         {
             PlayerStats[playerId] = new PlayerDamageStats { PlayerId = playerId };
         }
         return PlayerStats[playerId];
-
     }
 
-    // Add this method to your existing DamageTracker class:
+    // NEW: Separate method to increment shots hit (called after all filters pass)
+    public void IncrementShotsHit(string playerId)
+    {
+        var stats = GetOrCreatePlayerStats(playerId);
+        stats.ShotsHit++;
+    }
 
-    public void RecordDamage(string attacker, string victim, uint? damage, bool? isFatal)
+    // Add this method to your existing DamageTracker class - UPDATED: Skip knocked/bot damage
+    public void RecordDamage(string attacker, string victim, uint? damage, bool? isFatal, bool attackerIsBot = false, bool victimIsKnockedDown = false, bool victimIsBot = false)
     {
         if (!damage.HasValue) return;
+
+        // NEW: Skip damage if attacker is bot or victim is knocked/bot
+        if (attackerIsBot || victimIsKnockedDown || victimIsBot) return;
 
         var attackerStats = GetOrCreatePlayerStats(attacker);
         var victimStats = GetOrCreatePlayerStats(victim);
@@ -140,14 +150,12 @@ public class DamageTracker
         // Update attacker stats
         attackerStats.DamageDealt.Add(damageEvent);
         attackerStats.TotalDamageDealt += damage.Value;
-        attackerStats.ShotsHit++;
-
 
         // Update victim stats
         victimStats.DamageTaken.Add(damageEvent);
         victimStats.TotalDamageTaken += damage.Value;
 
-       // Console.WriteLine($"💥 {attacker} dealt {damage} damage to {victim}{(isFatal == true ? " (ELIMINATION)" : "")}");
+        // Console.WriteLine($"💥 {attacker} dealt {damage} damage to {victim}{(isFatal == true ? " (ELIMINATION)" : "")}");
     }
 
     public void PrintSummary()
@@ -156,7 +164,7 @@ public class DamageTracker
         Console.WriteLine("\nDamage Dealt:");
         foreach (var player in PlayerStats.Values.OrderByDescending(p => p.TotalDamageDealt))
         {
-            Console.WriteLine($"{player.PlayerId}: {player.TotalDamageDealt} (Eliminations: {player.Eliminations})");
+            Console.WriteLine($"{player.PlayerId}: {player.TotalDamageDealt} (Shots Hit: {player.ShotsHit})");
         }
 
         Console.WriteLine("\nDamage Taken:");
@@ -167,7 +175,7 @@ public class DamageTracker
 
         var summary = GetDamageSummary();
         Console.WriteLine($"\nTotal Damage Events: {PlayerStats.Values.Sum(p => p.DamageDealt.Count)}");
-        Console.WriteLine($"Total Eliminations: {summary.TotalEliminations}");
+        Console.WriteLine($"Total Shots Hit: {summary.TotalShotsHit}");
     }
 
     private string? GetPlayerIdFromActor(uint? actorId)

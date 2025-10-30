@@ -58,6 +58,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         public DateTime Timestamp { get; set; }
     }
 
+
     private Queue<HarvestHit> recentHarvestHits = new Queue<HarvestHit>();
 
 
@@ -98,7 +99,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     private BuildAttributionTracker _buildAttributionTracker = new();
     private Dictionary<string, string> playerNames = new Dictionary<string, string>();
     private FortniteReplayBuilder Builder;
-
+    private HashSet<string> processedBuilds = new();
     private HashSet<string> processedEliminationIds = new HashSet<string>();
 
     private StreamWriter elimLogWriter;
@@ -765,7 +766,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         Builder.UpdateKillFeedWithNames();
         Builder.SetPlayerInfo(playerInfoByPlayerId);
-        PrintEliminationsSummary();
+        //Builder.PrintEliminationsSummary();
         PrintEliminationsSummaryWithNames();
 
         var elimCredits = EvaluateEliminationsFromEvents();
@@ -785,8 +786,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         PrintStructuralAnalysis();
         PrintEventSummary();
 
+
+        //ProcessPendingBuilds();
         BuildTracker.PrintBuildSummary();
         BuildTracker.PrintSanityChecks();
+        BuildTracker.PrintPlayerIdMappings();
         HarvestTracker.PrintHarvestSummary();
 
         //Builder.DebugPlayerEliminations("d6e651d508004eaeaf16dc434b0b41e7");
@@ -818,21 +822,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
             _branch = value;
         }
-    }
-
-    public void PrintEliminationsSummary()
-    {
-        Console.WriteLine($"\n≡ƒôê ELIMINATION EVENTS SUMMARY:");
-        Console.WriteLine($"   Total eliminations parsed: {_parsedEliminations.Count}\n");
-
-        for (int i = 0; i < _parsedEliminations.Count; i++)
-        {
-            var (eliminated, eliminator, time, knocked) = _parsedEliminations[i];
-            string action = knocked ? "KNOCK" : "ELIM";
-            Console.WriteLine($"   [{i + 1}] {action} @ {time:F2}s: {eliminated} by {eliminator}");
-        }
-
-        Console.WriteLine($"\n   ✅ Summary complete\n");
     }
 
     public void PrintEliminationsSummaryWithNames()
@@ -1257,14 +1246,25 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             LogVerbose($"  - {exportType}");
         }
     }
+    private Dictionary<uint, List<(double timestamp, string playerId)>> channelOwnershipHistory = new();
+
+    private HashSet<uint> openedChannels = new();
+    private Dictionary<uint, uint> allChannelsToActorGuid = new();
+
     protected override void OnChannelOpened(uint channelIndex, NetworkGUID? actorGuid)
     {
+        openedChannels.Add(channelIndex);
+
         base.OnChannelOpened(channelIndex, actorGuid);
 
         if (actorGuid != null && Channels[channelIndex]?.Actor != null)
         {
             var actor = Channels[channelIndex].Actor;
             var actorGuidValue = actorGuid.Value;
+            var currentTime = Builder.GetCurrentTimeDouble();
+
+            // ✅ Track ALL channels to their actor GUIDs
+            allChannelsToActorGuid[channelIndex] = actorGuidValue;
 
             if (actor.Archetype != null)
             {
@@ -1282,7 +1282,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     archetypePath = $"ArchetypeGUID={archetypeGuidValue} (path pending)";
                 }
 
-                LogVerbose($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
+                Console.WriteLine($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
+
 
                 // ✅ ALWAYS tell the builder about this channel-actor mapping
                 Builder.AddActorChannel(channelIndex, actorGuidValue);
@@ -1306,7 +1307,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                         // ✅ Map this channel to the player
                         channelToPlayerId[channelIndex] = newPlayerId;
 
-                        LogVerbose($"    ↳ Registered PlayerState {actorGuidValue} → player {newPlayerId} on channel {channelIndex}");
+                        // ✅ Track channel ownership history
+                        if (!channelOwnershipHistory.ContainsKey(channelIndex))
+                            channelOwnershipHistory[channelIndex] = new List<(double, string)>();
+                        channelOwnershipHistory[channelIndex].Add((currentTime, newPlayerId));
+
+                        LogVerbose($"    ↳ Registered PlayerState {actorGuidValue} → player {newPlayerId} on channel {channelIndex} at {currentTime}s");
                     }
                 }
 
@@ -1319,7 +1325,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     if (actorGuidToPlayerId.TryGetValue(actorGuidValue, out var playerId))
                     {
                         channelToPlayerId[channelIndex] = playerId;
-                        LogVerbose($"    ↳ Mapped pawn channel {channelIndex} → player {playerId}");
+
+                        // ✅ Track channel ownership history
+                        if (!channelOwnershipHistory.ContainsKey(channelIndex))
+                            channelOwnershipHistory[channelIndex] = new List<(double, string)>();
+                        channelOwnershipHistory[channelIndex].Add((currentTime, playerId));
+
+                        LogVerbose($"    ↳ Mapped pawn channel {channelIndex} → player {playerId} at {currentTime}s");
                     }
                     else
                     {
@@ -1329,8 +1341,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
         }
     }
-
-
     private string? ResolvePlayerFromPawn(uint pawnActorGuid)
     {
         // Method 1: Direct mapping (if we already mapped this pawn)
@@ -1957,6 +1967,26 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     protected override void OnExportRead(uint channelIndex, INetFieldExportGroup? exportGroup)
     {
+   
+
+        // ✅ Capture WorldPlayerId→EpicID mapping from FortPlayerState
+        if (exportGroup is FortPlayerState playerState)
+        {
+            if (playerState.WorldPlayerId.HasValue && !string.IsNullOrEmpty(playerState.UniqueID))
+            {
+                short persistentId = playerState.WorldPlayerId.Value;
+                string epicId = playerState.UniqueID;
+
+                // Extract just the epic ID part (remove the [platform] suffix if present)
+                if (epicId.Contains("["))
+                    epicId = epicId.Split('[')[0].Trim();
+
+                // Store the mapping
+                persistentIdToPlayerId[persistentId] = epicId;
+
+                Console.WriteLine($"✅ Mapped PersistentID {persistentId} → Epic ID: {epicId}");
+            }
+        }
 
         if (exportGroup is PlayerPawnCache pawnCache)
         {
@@ -2001,16 +2031,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
         }
 
-
-
         var actualType = exportGroup.GetType();
         var fullName = actualType.FullName;
         var assemblyName = actualType.Assembly.GetName().Name;
 
-
         switch (exportGroup)
         {
-
             case GameState state:
                 Builder.UpdateGameState(state);
                 break;
@@ -2025,6 +2051,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 Builder.UpdatePlayerPawn(channelIndex, pawn);
                 ProcessPlayerPawn(pawn, channelIndex);
                 PrintObjectProperties(pawn, "PlayerPawn", 0);
+                break;
+
+            case PlayerBuild playerBuild:
+                Console.WriteLine($"[DEBUG] PlayerBuild detected");
+                Console.WriteLine($"[DEBUG] Owner: {playerBuild.Owner}");
+                Console.WriteLine($"[DEBUG] Channel: {channelIndex}");
                 break;
 
             case FortBroadcastRemoteClientInfo remoteClientInfo:
@@ -2783,6 +2815,9 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                itemDefinitionName.Contains("MetalItemData");
     }
 
+    private int deduplicationHits = 0;
+
+
     private void ProcessBuild(uint channelIndex, BaseBuild build, string buildTypeName, string material)
     {
         if (!(build.bPlayerPlaced == true || build.bIsInitiallyBuilding == true))
@@ -2794,46 +2829,46 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var currentTimeValue = Builder.GetCurrentTimeDouble();
         var currentTime = (float) currentTimeValue;
 
-        LogVerbose($"\n=== BUILD: {material} {buildTypeName} at {currentTime}s ===");
-
         // Check if OwnerPersistentID is available
         if (build.OwnerPersistentID?.Value == null)
         {
-            LogVerbose($"⚠️ No OwnerPersistentID - skipping build");
+            Console.WriteLine($"⚠️ BUILD SKIPPED: No OwnerPersistentID at {currentTime}s - Material: {material}, Type: {buildTypeName}");
             return;
         }
 
         short persistentId = build.OwnerPersistentID.Value.Value;
-        LogVerbose($"  OwnerPersistentID: {persistentId}");
+        Console.WriteLine($"\n=== BUILD: {material} {buildTypeName} at {currentTime}s (PersistentID: {persistentId}) ===");
 
         // Map persistent ID to Epic ID using PawnUniqueID mapping
         var epicId = GetEpicIdFromPersistentId(persistentId);
 
         if (epicId == null)
         {
-            LogVerbose($"⚠️ Could not map OwnerPersistentID {persistentId} to Epic ID - skipping build");
-            LogVerbose($"   Available PawnUniqueID mappings: {string.Join(", ", persistentIdToPlayerId.Keys.OrderBy(x => x))}");
-            LogVerbose($"   Available Player→Epic mappings: {string.Join(", ", playerIdToEpicId.Keys)}");
+            Console.WriteLine($"⚠️ Could not map OwnerPersistentID {persistentId} to Epic ID - skipping build");
+            Console.WriteLine($"   Available PersistentID mappings: {string.Join(", ", persistentIdToPlayerId.Keys.OrderBy(x => x))}");
+            Console.WriteLine($"   Available Player→Epic mappings: {string.Join(", ", playerIdToEpicId.Keys)}");
             return;
         }
 
-        LogVerbose($"✓ Mapped to Epic ID: {epicId}");
+        Console.WriteLine($"✓ Mapped persistentId({persistentId}) to Epic ID: {epicId}");
 
         var actorGuid = channelToActorGuid.GetValueOrDefault(channelIndex);
 
         BuildTracker.RecordBuild(
             actorGuid,
             epicId.ToLower(),
-            $"{material}_{buildTypeName}",
+            material,
+            buildTypeName,
             build.bPlayerPlaced ?? true,
             build.bDestroyed ?? false,
             build.TeamIndex.Value,
             build.Health ?? 100,
             build.EditingPlayer?.Value,
-            currentTime
+            currentTime,
+            build.OwnerPersistentID?.Value.Value
         );
 
-        LogVerbose($"✓ Build recorded for Epic ID: {epicId}");
+        Console.WriteLine($"✓ Build recorded for Epic ID: {epicId}");
     }
 
     private string GetEpicIdFromPersistentId(short persistentId)
@@ -3520,11 +3555,38 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             return; // Same team
         }
 
+        // ✅ FILTER 7: Don't count damage to knocked players
+        var playerTimelines = Builder.GetPlayerStateHistory();
+
+        bool victimIsKnockedDown = false;
+        if (playerTimelines.ContainsKey(victimPlayerId))
+        {
+            var victimHistory = playerTimelines[victimPlayerId];
+            float currentTime = (float) Builder.GetCurrentTimeDouble();
+
+            var knockedStatus = victimHistory
+                .Where(h => h.timestamp <= currentTime)
+                .OrderByDescending(h => h.timestamp)
+                .FirstOrDefault();
+
+            if (knockedStatus.property == "bDBNO" && knockedStatus.value is bool bdbno && bdbno == true)
+            {
+                victimIsKnockedDown = true;
+            }
+        }
+
+        // Skip damage to knocked players
+        if (victimIsKnockedDown)
+        {
+            Console.WriteLine($"⚠️  DAMAGE IGNORED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} (victim is knocked down)");
+            return;
+        }
+
         // ✅ ALL FILTERS PASSED - Record the damage
         uint damageAmount = (uint) damageCues.Magnitude.Value;
         DamageTracker.RecordDamage(attackerPlayerId, victimPlayerId, damageAmount, false);
 
-        LogVerbose($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
+        Console.WriteLine($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
     }
 
     private void AnalyzeForStats(object obj, string typeName, uint channelIndex, string? playerId = null)

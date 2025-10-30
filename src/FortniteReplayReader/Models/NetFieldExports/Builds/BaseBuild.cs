@@ -16,6 +16,9 @@ public abstract class BaseBuild : INetFieldExportGroup
     [NetFieldExport("Role", RepLayoutCmdType.Ignore)]
     public int? Role { get; set; }
 
+    [NetFieldExport("Instigator", RepLayoutCmdType.Property)]
+    public ActorGuid Instigator { get; set; }
+
     [NetFieldExport("OwnerPersistentID", RepLayoutCmdType.Property)]
     public PersistentIdProperty OwnerPersistentID { get; set; }
 
@@ -78,4 +81,28 @@ public abstract class BaseBuild : INetFieldExportGroup
 
     [NetFieldExport("InitialOverlappingVehicles", RepLayoutCmdType.Property)]
     public DebuggingObject InitialOverlappingVehicles { get; set; }
+
+    [NetFieldExport("bMirrored", RepLayoutCmdType.PropertyBool)]
+    public bool? bMirrored { get; set; }
+
+    [NetFieldExport("ReplicatedDrawScale3D", RepLayoutCmdType.Property)]
+    public FVector? ReplicatedDrawScale3D { get; set; }
+
+    [NetFieldExport("ProxyGameplayCueDamageMagnitude", RepLayoutCmdType.Property)]
+    public float? ProxyGameplayCueDamageMagnitude { get; set; }
+
+    [NetFieldExport("bUnderRepair", RepLayoutCmdType.PropertyBool)]
+    public bool? bUnderRepair { get; set; }
+
+    [NetFieldExport("DoorOpenStyle", RepLayoutCmdType.Enum)]
+    public int? DoorOpenStyle { get; set; }
+
+    [NetFieldExport("bDoorCollisionDisabled", RepLayoutCmdType.PropertyBool)]
+    public bool? bDoorCollisionDisabled { get; set; }
+
+    [NetFieldExport("bFastOpenRequested", RepLayoutCmdType.PropertyBool)]
+    public bool? bFastOpenRequested { get; set; }
+
+    [NetFieldExport("bDoorOpen", RepLayoutCmdType.PropertyBool)]
+    public bool? bDoorOpen { get; set; }
 }
