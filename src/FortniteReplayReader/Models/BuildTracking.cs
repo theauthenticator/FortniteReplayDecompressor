@@ -87,12 +87,12 @@ namespace FortniteReplayReader.Models
                 b.IsPlayerPlaced && !b.IsDestroyed);
         }
 
-     
+
         /// <summary>
         /// Primary overload - accepts material and buildType directly to avoid double-parsing
         /// </summary>
         public void RecordBuild(uint actorId, string playerId, string material, string buildType,
-    bool isPlayerPlaced, bool isDestroyed, int teamIndex, int health,
+    bool isPlayerPlaced, bool isDestroyed, int teamIndex, short health,
     uint? editingPlayer, float gameTime, short? ownerPersistentId = null, string exportPath = "")
         {
 

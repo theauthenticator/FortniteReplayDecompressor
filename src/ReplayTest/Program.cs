@@ -14,9 +14,6 @@ var epicAccessToken = "dbb29d4e04844d868240b66f5408090a";
 var replayIds = new[]
 {
     "a877d042840648a3bda24cb9b831459b",
-    "99213d64337b43ee918c5bfaa0f8a1e0",
-    "899a1b1da214499b9584f16f7896fb4f",
-    "dd2b5a2d74b5414ba4f228cc9463c03f",
 };
 var maxParallel = 4;
 

@@ -94,6 +94,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     private Dictionary<uint, string> actorGuidToPlayerId = new Dictionary<uint, string>();
     private Dictionary<string, PlayerInfo> playerInfoByPlayerId = new Dictionary<string, PlayerInfo>();
     private DamageTracker DamageTracker = new();
+
+    private Dictionary<short, string> _ownerPersistentIdToEpicId = new();
     private BuildOwnershipTracker _buildOwnershipTracker = new();
 
     private BuildAttributionTracker _buildAttributionTracker = new();
@@ -750,54 +752,57 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         try
         {
+            Console.WriteLine("[READREPLAY_START]");
             ReadReplay(archive);
+            Console.WriteLine("[READREPLAY_COMPLETE]");
         }
         catch (Exception ex)
         {
+            Console.WriteLine($"[READREPLAY_CRASH] {ex.Message}");
             LogVerbose($"CRASH during replay reading: {ex}");
             LogVerbose($"Stack: {ex.StackTrace}");
             throw;
         }
 
+        Console.WriteLine("[BUILDING_REPLAY]");
         var replay = Builder.Build(Replay);
         replay.DamageSummary = DamageTracker.GetDamageSummary();
 
+        Console.WriteLine("[POSTPROCESSING_HARVESTS]");
         PostProcessHarvestHits();
 
+        Console.WriteLine("[UPDATING_KILLFEED]");
         Builder.UpdateKillFeedWithNames();
         Builder.SetPlayerInfo(playerInfoByPlayerId);
-        //Builder.PrintEliminationsSummary();
         PrintEliminationsSummaryWithNames();
 
+        Console.WriteLine("[EVALUATING_ELIMINATIONS]");
         var elimCredits = EvaluateEliminationsFromEvents();
         Builder.SetEliminationCredits(elimCredits);
-        //Builder.ProcessEliminationsFromKillFeed();
-        // Builder.GetFinalKillScores();
-        // Builder.PrintFinalKillScores();
-        // Builder.PrintFinalAthenaKills();
 
+        Console.WriteLine($"[DEBUG] Total builds tracked by OwnerPersistentID: {_buildCountByOwnerPersistentId.Count}");
+        Console.WriteLine($"[DEBUG] Total unique OwnerPersistentIDs: {_buildCountByOwnerPersistentId.Keys.Count}");
 
-        //ProcessEliminationsFromKillFeed();
-        //ValidateKillCounts();
-        // PrintEliminationPropertySummary();
-        // Print comprehensive analysis
-        //ExtractFinalAthenaKills();
-        //ExtractAndPrintFinalAthenaKills();
+        Console.WriteLine("[PRINTING_ANALYSIS]");
         PrintStructuralAnalysis();
         PrintEventSummary();
 
-
-        //ProcessPendingBuilds();
+        Console.WriteLine("[PRINTING_SUMMARIES]");
         BuildTracker.PrintBuildSummary();
         BuildTracker.PrintSanityChecks();
         BuildTracker.PrintPlayerIdMappings();
         HarvestTracker.PrintHarvestSummary();
 
-        //Builder.DebugPlayerEliminations("d6e651d508004eaeaf16dc434b0b41e7");
+        Console.WriteLine("[BEFORE_LOGBUILDCOUNTS]");
+        LogBuildCountsByOwner();
+        MapPlayerStatesForBuildTracking();
+        Console.WriteLine("[AFTER_LOGBUILDCOUNTS]");
 
+        Console.WriteLine("[EXPORTING_UNKNOWNS]");
         var unknownHarvestablesPath = "unknown_harvestables.csv";
         ExportUnknownHarvestables(unknownHarvestablesPath);
 
+        Console.WriteLine("[READREPLAY_FINISHED]");
         return replay;
     }
 
@@ -1965,26 +1970,30 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         return "Unknown";
     }
 
+    private Dictionary<string, string> persistentIdMappingHistory = new();
+
+
     protected override void OnExportRead(uint channelIndex, INetFieldExportGroup? exportGroup)
     {
-   
+
 
         // ✅ Capture WorldPlayerId→EpicID mapping from FortPlayerState
         if (exportGroup is FortPlayerState playerState)
         {
             if (playerState.WorldPlayerId.HasValue && !string.IsNullOrEmpty(playerState.UniqueID))
             {
-                short persistentId = playerState.WorldPlayerId.Value;
+                short worldPlayerId = playerState.WorldPlayerId.Value;
                 string epicId = playerState.UniqueID;
+                float currentTime = (float) Builder.GetCurrentTimeDouble();
 
-                // Extract just the epic ID part (remove the [platform] suffix if present)
                 if (epicId.Contains("["))
                     epicId = epicId.Split('[')[0].Trim();
 
-                // Store the mapping
-                persistentIdToPlayerId[persistentId] = epicId;
+                string timeKey = $"{worldPlayerId}_{currentTime:F2}";
+                persistentIdToPlayerId[worldPlayerId] = epicId;
+                persistentIdMappingHistory[timeKey] = epicId;
 
-                Console.WriteLine($"✅ Mapped PersistentID {persistentId} → Epic ID: {epicId}");
+                Console.WriteLine($"✅ Mapped WorldPlayerId {worldPlayerId} → {epicId} at {currentTime}s");
             }
         }
 
@@ -2046,8 +2055,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 break;
 
             case PlayerPawn pawn:
-                LogVerbose($"\n=== PLAYER PAWN UPDATE ===");
-                LogVerbose($"PawnUniqueID: {pawn.PawnUniqueID}");
+                Console.WriteLine($"\n=== PLAYER PAWN UPDATE ===");
+                Console.WriteLine($"PawnUniqueID: {pawn.PawnUniqueID}");
                 Builder.UpdatePlayerPawn(channelIndex, pawn);
                 ProcessPlayerPawn(pawn, channelIndex);
                 PrintObjectProperties(pawn, "PlayerPawn", 0);
@@ -2323,46 +2332,32 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 AnalyzeForStats(healthSet, "HealthSet", channelIndex);
                 break;
 
-            // Wood builds
+            // Wood walls & windows
             case WoodWall:
             case WoodArchwayWall:
             case WoodBraceWall:
             case WoodDoorSideWall:
             case WoodDoorWall:
             case WoodWindowSideWall:
+            case WoodWindowCenterWall:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Wood");
                 break;
 
-            // Stone builds
-            case StoneWall:
-            case StoneArchwayWall:
-            case StoneBraceWall:
-            case StoneDoorSideWall:
-            case StoneDoorWall:
-            case StoneWindowSideWall:
-                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Stone");
-                break;
-
-            // Metal builds  
-            case MetalWall:
-            case MetalArchwayWall:
-            case MetalBraceWall:
-            case MetalDoorSideWall:
-            case MetalDoorWall:
-            case MetalWindowSideWall:
-                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Metal");
-                break;
-
-            // Wood floors
-            case WoodFloor:
-            case WoodBalconyIFloor:
-            case WoodBalconySFloor:
-                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Wood");
+            // Wood half & quarter walls
+            case WoodHalfWall:
+            case WoodQuarterWall:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Wood");
                 break;
 
             // Wood roofs
             case WoodRoof:
             case WoodRoofI:
+            case WoodRoofOctagonal:
+            case WoodRoofSlope:
+            case WoodRoofDome:
+            case WoodRoofWall:
+            case WoodArchwayLargeSupport:
+            case WoodBalconyOuter:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Roof", "Wood");
                 break;
 
@@ -2373,13 +2368,43 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Stair", "Wood");
                 break;
 
-            // Stone floors
-            case StoneFloor:
-                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Stone");
+            // Wood floors
+            case WoodFloor:
+            case WoodBalconyIFloor:
+            case WoodBalconySFloor:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Wood");
+                break;
+
+            // Stone walls & windows
+            case StoneWall:
+            case StoneArchwayWall:
+            case StoneBraceWall:
+            case StoneDoorSideWall:
+            case StoneDoorWall:
+            case StoneWindowSideWall:
+            case StoneWindowsSideWall:
+            case StoneWindowsCenterWall:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Stone");
+                break;
+
+            // Stone half & quarter walls
+            case StoneHalfWall:
+            case StoneQuarterWall:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Stone");
                 break;
 
             // Stone roofs
             case StoneRoof:
+            case StoneRoofDome:
+            case StoneRoofOctagonal:
+            case StoneRoofSlope:
+            case StoneRoofWall:
+            case StoneRoofInterior:
+            case StoneBalconyInterior:
+            case StoneBalconyOuter:
+            case StoneBalconySmall:
+            case StoneBalconyDome:
+            case StoneArchwayLargeSupport:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Roof", "Stone");
                 break;
 
@@ -2390,13 +2415,37 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Stair", "Stone");
                 break;
 
-            // Metal floors
-            case MetalFloor:
-                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Metal");
+            // Stone floors
+            case StoneFloor:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Stone");
                 break;
 
-            // Metal roofs
+            // Metal walls & windows
+            case MetalWall:
+            case MetalArchwayWall:
+            case MetalBraceWall:
+            case MetalDoorSideWall:
+            case MetalDoorWall:
+            case MetalWindowSideWall:
+            case MetalWindowCenterWall:
+            case MetalHalfWall:
+            case MetalQuarterWall:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Wall", "Metal");
+                break;
+
+            // Metal roofs & archways
             case MetalRoof:
+            case MetalRoofOctagonal:
+            case MetalRoofInterior:
+            case MetalRoofSlope:
+            case MetalRoofDome:
+            case MetalRoofWall:
+            case MetalArchway:
+            case MetalBalconyInterior:
+            case MetalBalconySmall:
+            case MetalBalconyOuter:
+            case MetalBalconyDome:
+            case MetalArchwayLargeSupport:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Roof", "Metal");
                 break;
 
@@ -2404,6 +2453,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             case MetalStair:
             case MetalStairF:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Stair", "Metal");
+                break;
+
+            // Metal floors
+            case MetalFloor:
+                ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Metal");
                 break;
 
             default:
@@ -2816,84 +2870,162 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     }
 
     private int deduplicationHits = 0;
-
+    private Dictionary<short, int> _buildCountByOwnerPersistentId = new();
 
     private void ProcessBuild(uint channelIndex, BaseBuild build, string buildTypeName, string material)
     {
         if (!(build.bPlayerPlaced == true || build.bIsInitiallyBuilding == true))
+        {
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bPlayerPlaced={build.bPlayerPlaced}, bIsInitiallyBuilding={build.bIsInitiallyBuilding}");
             return;
+        }
 
         if (!build.TeamIndex.HasValue)
+        {
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: No TeamIndex");
             return;
+        }
 
         var currentTimeValue = Builder.GetCurrentTimeDouble();
         var currentTime = (float) currentTimeValue;
 
-        // Check if OwnerPersistentID is available
-        if (build.OwnerPersistentID?.Value == null)
+        // ✅ Get actor from channel directly
+        var channel = Channels[channelIndex];
+        var actorGuid = channel?.Actor?.ActorNetGUID?.Value ?? 0;
+
+        Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex}, ActorGuid: {actorGuid}, OwnerPersistentID: {build.OwnerPersistentID?.Value.Value}, Time: {currentTime}s");
+        Console.WriteLine($"[BUILD_CHECK] EditingPlayer: {build.EditingPlayer?.Value}, bDestroyed: {build.bDestroyed}, bIsInitiallyBuilding: {build.bIsInitiallyBuilding}");
+
+        if (build.EditingPlayer?.Value > 0)
         {
-            Console.WriteLine($"⚠️ BUILD SKIPPED: No OwnerPersistentID at {currentTime}s - Material: {material}, Type: {buildTypeName}");
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: EditingPlayer={build.EditingPlayer?.Value}");
             return;
         }
 
-        short persistentId = build.OwnerPersistentID.Value.Value;
-        Console.WriteLine($"\n=== BUILD: {material} {buildTypeName} at {currentTime}s (PersistentID: {persistentId}) ===");
-
-        // Map persistent ID to Epic ID using PawnUniqueID mapping
-        var epicId = GetEpicIdFromPersistentId(persistentId);
-
-        if (epicId == null)
+        if (build.bDestroyed == true)
         {
-            Console.WriteLine($"⚠️ Could not map OwnerPersistentID {persistentId} to Epic ID - skipping build");
-            Console.WriteLine($"   Available PersistentID mappings: {string.Join(", ", persistentIdToPlayerId.Keys.OrderBy(x => x))}");
-            Console.WriteLine($"   Available Player→Epic mappings: {string.Join(", ", playerIdToEpicId.Keys)}");
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bDestroyed=true");
             return;
         }
 
-        Console.WriteLine($"✓ Mapped persistentId({persistentId}) to Epic ID: {epicId}");
+        if (build.bIsInitiallyBuilding != true)
+        {
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bIsInitiallyBuilding={build.bIsInitiallyBuilding}");
+            return;
+        }
 
-        var actorGuid = channelToActorGuid.GetValueOrDefault(channelIndex);
+        short? expectedHealth = GetExpectedInitialHealth(material, buildTypeName);
+        if (expectedHealth.HasValue && build.Health != expectedHealth.Value)
+        {
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: Health mismatch expected={expectedHealth}, actual={build.Health}");
+            return;
+        }
 
-        BuildTracker.RecordBuild(
-            actorGuid,
-            epicId.ToLower(),
-            material,
-            buildTypeName,
-            build.bPlayerPlaced ?? true,
-            build.bDestroyed ?? false,
-            build.TeamIndex.Value,
-            build.Health ?? 100,
-            build.EditingPlayer?.Value,
-            currentTime,
-            build.OwnerPersistentID?.Value.Value
-        );
+        long timeMs = (long) (currentTimeValue * 1000);
+        string buildKey = $"{channelIndex}_{timeMs}";
 
-        Console.WriteLine($"✓ Build recorded for Epic ID: {epicId}");
+        if (processedBuilds.Contains(buildKey))
+        {
+            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: Already processed");
+            return;
+        }
+
+        // ✅ Track by OwnerPersistentID instead of resolving now
+        if (build.OwnerPersistentID != null)
+        {
+            short ownerPersistentId = build.OwnerPersistentID.Value.Value;
+
+            if (!_buildCountByOwnerPersistentId.ContainsKey(ownerPersistentId))
+                _buildCountByOwnerPersistentId[ownerPersistentId] = 0;
+
+            _buildCountByOwnerPersistentId[ownerPersistentId]++;
+
+            Console.WriteLine($"[BUILD_TRACKED] OwnerPersistentID {ownerPersistentId}: {buildTypeName} {material} (Total: {_buildCountByOwnerPersistentId[ownerPersistentId]})");
+        }
+        else
+        {
+            Console.WriteLine($"[BUILD_SKIP] Channel {channelIndex} - No OwnerPersistentID");
+        }
+
+        processedBuilds.Add(buildKey);
     }
 
-    private string GetEpicIdFromPersistentId(short persistentId)
+    private void MapPlayerStatesForBuildTracking()
     {
-        LogVerbose($"\n🔍 Looking up PersistentID: {persistentId}");
+        Console.WriteLine("\n[BUILD_MAPPING] Mapping OwnerPersistentID to Epic IDs from PlayerData...");
 
-        // Step 1: PawnUniqueID (persistentId) -> Internal PlayerId
-        if (persistentIdToPlayerId.TryGetValue(persistentId, out var internalPlayerId))
+        foreach (var playerData in Builder._players.Values)
         {
-            LogVerbose($"  ✓ Step 1: Found internal player ID: {internalPlayerId}");
-
-            // Step 2: Internal PlayerId -> Epic ID
-            if (playerIdToEpicId.TryGetValue(internalPlayerId, out var epicId))
+            if (playerData.PlayerNumber.HasValue)
             {
-                LogVerbose($"  ✓ Step 2: Found Epic ID: {epicId}");
-                return epicId;
-            }
+                short playerNumber = (short) playerData.PlayerNumber.Value;
+                string epicId = playerData.EpicId ?? playerData.PlatformUniqueNetId ?? playerData.PlayerId ?? "UNKNOWN";
 
-            LogVerbose($"  ⚠️ Step 2 failed: Internal player {internalPlayerId} found but no Epic ID mapping");
-            LogVerbose($"     Available Epic ID mappings: {string.Join(", ", playerIdToEpicId.Keys)}");
-            return internalPlayerId; // Fallback to internal ID
+                _ownerPersistentIdToEpicId[playerNumber] = epicId;
+                Console.WriteLine($"[BUILD_MAPPING] PlayerNumber {playerNumber} → {epicId}");
+            }
         }
 
-        LogVerbose($"  ✗ Step 1 failed: No mapping found for PersistentID {persistentId}");
-        LogVerbose($"     Available PersistentID mappings: {string.Join(", ", persistentIdToPlayerId.Keys.OrderBy(x => x))}");
+        Console.WriteLine($"[BUILD_MAPPING] Mapped {_ownerPersistentIdToEpicId.Count} players\n");
+    }
+    public void LogBuildCountsByOwner()
+    {
+        Console.WriteLine("\n" + new string('=', 80));
+        Console.WriteLine("📊 BUILD COUNTS BY OWNER PERSISTENT ID");
+        Console.WriteLine(new string('=', 80));
+
+        foreach (var kvp in _buildCountByOwnerPersistentId.OrderByDescending(x => x.Value))
+        {
+            Console.WriteLine($"  OwnerPersistentID {kvp.Key}: {kvp.Value} builds");
+        }
+
+        Console.WriteLine(new string('=', 80) + "\n");
+    }
+    private short? GetExpectedInitialHealth(string material, string buildType)
+    {
+        return (material.ToLower(), buildType.ToLower()) switch
+        {
+            ("wood", "wall") => 90,
+            ("wood", "floor") => 84,
+            ("wood", "roof") => 84,
+            ("wood", "stair") => 84,
+            ("stone", "wall") => 99,
+            ("stone", "floor") => 93,
+            ("stone", "roof") => 93,
+            ("stone", "stair") => 93,
+            ("metal", "wall") => 110,
+            ("metal", "floor") => 101,
+            ("metal", "roof") => 101,
+            ("metal", "stair") => 101,
+            _ => null
+        };
+    }
+
+
+    private string GetEpicIdFromPersistentId(short pawnUniqueId)
+    {
+        Console.WriteLine($"[DEBUG] Looking up Epic ID for pawnUniqueId: {pawnUniqueId}");
+
+        if (pawnUniqueIdToPlayerId.TryGetValue(pawnUniqueId, out var playerId))
+        {
+            Console.WriteLine($"[DEBUG] Found playerId: {playerId}");
+
+            if (playerIdToEpicId.TryGetValue(playerId, out var epicId))
+            {
+                Console.WriteLine($"[DEBUG] Found epicId: {epicId}");
+                return epicId;
+            }
+            else
+            {
+                Console.WriteLine($"[DEBUG] No epicId found for playerId: {playerId}");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"[DEBUG] No playerId found for pawnUniqueId: {pawnUniqueId}");
+        }
+
+        Console.WriteLine($"[DEBUG] Returning null for pawnUniqueId: {pawnUniqueId}");
         return null;
     }
 
@@ -3156,28 +3288,55 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         AnalyzeForStats(state, "FortPlayerState", channelIndex, playerIdFromBuilder);
     }
 
+    private Dictionary<short, string> pawnUniqueIdToEpicId = new();
+
+    private Dictionary<short, string> pawnUniqueIdToPlayerId = new();
+
     private void ProcessPlayerPawn(PlayerPawn pawn, uint channelIndex)
     {
         var pawnChannel = Channels[channelIndex];
         var pawnActorGuid = pawnChannel?.Actor?.ActorNetGUID?.Value;
         var playerStateActorGuid = pawn.PlayerState;
 
-        LogVerbose($"=== PLAYER PAWN on Channel {channelIndex} ===");
-        LogVerbose($"Pawn Actor GUID: {pawnActorGuid}");
-        LogVerbose($"PlayerState GUID: {playerStateActorGuid}");
+        Console.WriteLine($"[PAWN_DEBUG] Channel: {channelIndex}, PawnUniqueID: {pawn.PawnUniqueID}, Actor: {pawnActorGuid}");
+
+        Console.WriteLine($"=== PLAYER PAWN on Channel {channelIndex} ===");
+        Console.WriteLine($"Pawn Actor GUID: {pawnActorGuid}");
+        Console.WriteLine($"PlayerState GUID: {playerStateActorGuid}");
 
         string? pawnPlayerId = null;
+
+        if (pawnActorGuid.HasValue)
+        {
+            Console.WriteLine("Looking up pawn actor in builder...");
+            Console.WriteLine($"Pawn Actor GUID: {pawnActorGuid.Value}");
+            var pawnPlayerId1 = Builder.ResolveActorIdToPlayerId(pawnActorGuid.Value);
+
+            if (pawnPlayerId1 != null)
+            {
+                Console.WriteLine($"Builder resolved pawn actor to player ID: {pawnPlayerId1}");
+            }
+            else
+            {
+                Console.WriteLine($"Builder could not resolve pawn actor GUID to player ID");
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Pawn Actor GUID: NULL");
+        }
 
         // Try to resolve player ID
         if (pawnActorGuid.HasValue && actorGuidToPlayerId.ContainsKey(pawnActorGuid.Value))
         {
             pawnPlayerId = actorGuidToPlayerId[pawnActorGuid.Value];
-            LogVerbose($"✓ Found player via pawn actor GUID: {pawnPlayerId}");
+            Console.WriteLine($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via pawn actor GUID: {pawnPlayerId}");
         }
+
         else if (playerStateActorGuid.HasValue && actorGuidToPlayerId.ContainsKey(playerStateActorGuid.Value))
         {
             pawnPlayerId = actorGuidToPlayerId[playerStateActorGuid.Value];
-            LogVerbose($"✓ Found player via PlayerState GUID: {pawnPlayerId}");
+            Console.WriteLine($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via PlayerState GUID: {pawnPlayerId}");
 
             // CRITICAL: Map the pawn to this player
             if (pawnActorGuid.HasValue)
@@ -3187,7 +3346,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 if (playerInfoByPlayerId.TryGetValue(pawnPlayerId, out var playerInfo))
                 {
                     pawnToPlayerState[pawnActorGuid.Value] = playerInfo;
-                    LogVerbose($"✅ MAPPED PAWN: {pawnActorGuid.Value} → {pawnPlayerId}");
+                    Console.WriteLine($"✅ MAPPED PAWN: {pawnActorGuid.Value} → {pawnPlayerId}");
                 }
 
                 DamageTracker.MapActorToPlayer(pawnActorGuid.Value, pawnPlayerId);
@@ -3195,37 +3354,28 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 // ✅ ADD THIS: Map channel to player
                 channelToPlayerId[channelIndex] = pawnPlayerId;
 
-                LogVerbose($"✓ LINKED PAWN: Actor {pawnActorGuid.Value} -> Player {pawnPlayerId}");
+                Console.WriteLine($"✓ LINKED PAWN: Actor {pawnActorGuid.Value} -> Player {pawnPlayerId}");
             }
         }
         else
         {
-            LogVerbose($"⚠️ Could not identify player for pawn");
+            Console.WriteLine($"⚠️ Could not identify player for pawn");
         }
 
         // ✅ Track activity AFTER we've populated channelToPlayerId
         if (!string.IsNullOrEmpty(pawnPlayerId))
         {
             channelToPlayerId[channelIndex] = pawnPlayerId;
-            LogVerbose($"✅ MAPPED PAWN CHANNEL: {channelIndex} → Player {pawnPlayerId}");
+            Console.WriteLine($"✅ MAPPED PAWN CHANNEL: {channelIndex} → Player {pawnPlayerId}");
+
 
             var currentTime = (float) Builder.GetCurrentTimeDouble();
             lastChannelActivityTime[channelIndex] = currentTime;
             mostRecentActiveChannel = channelIndex;
-            LogVerbose($"🎯 Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
+            Console.WriteLine($"🎯 Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
         }
 
-        LogVerbose($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
-        // ✅ ONLY track activity AFTER we know this is a valid player
-        if (!string.IsNullOrEmpty(pawnPlayerId))
-        {
-            var currentTime = (float) Builder.GetCurrentTimeDouble();
-            lastChannelActivityTime[channelIndex] = currentTime;
-            mostRecentActiveChannel = channelIndex;
-            LogVerbose($"✓ Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
-        }
-
-        LogVerbose($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
+        Console.WriteLine($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
 
         // Check for PawnUniqueID and map it
         var pawnType = pawn.GetType();
@@ -3236,9 +3386,9 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             try
             {
                 var pawnUniqueId = pawnIdProp.GetValue(pawn);
-                LogVerbose($"PawnUniqueID: {pawnUniqueId} (Type: {pawnIdProp.PropertyType.Name})");
+                Console.WriteLine($"PawnUniqueID: {pawnUniqueId} (Type: {pawnIdProp.PropertyType.Name})");
 
-                if (pawnUniqueId != null && !string.IsNullOrEmpty(pawnPlayerId))
+                if (pawnUniqueId != null)
                 {
                     short persistentId = 0;
                     bool canMap = false;
@@ -3263,42 +3413,52 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                         persistentId = (short) uintVal;
                         canMap = true;
                     }
-
                     if (canMap && persistentId != 0)
                     {
-                        if (!persistentIdToPlayerId.ContainsKey(persistentId))
+                        if (!pawnUniqueIdToPlayerId.ContainsKey(persistentId))
                         {
-                            persistentIdToPlayerId[persistentId] = pawnPlayerId;
-                            LogVerbose($"✓ Mapped PawnUniqueID {persistentId} -> Player {pawnPlayerId}");
+                            string playerId = null;
 
-                            if (playerIdToEpicId.TryGetValue(pawnPlayerId, out var epicId))
+                            // First, try pawnPlayerId (if we resolved it in this call)
+                            if (!string.IsNullOrEmpty(pawnPlayerId))
                             {
-                                LogVerbose($"  └─ Epic ID: {epicId}");
+                                playerId = pawnPlayerId;
+                                Console.WriteLine($"✓ Got Player from pawnPlayerId: {playerId}");
+                            }
+
+                            // Second, try channel mapping
+                            if (string.IsNullOrEmpty(playerId) && channelToPlayerId.TryGetValue(channelIndex, out var channelPlayerId))
+                            {
+                                playerId = channelPlayerId;
+                                Console.WriteLine($"✓ Got Player from channel {channelIndex}: {playerId}");
+                            }
+
+                            if (!string.IsNullOrEmpty(playerId))
+                            {
+                                pawnUniqueIdToPlayerId[persistentId] = playerId;
+                                Console.WriteLine($"✓ Mapped PawnUniqueID {persistentId} → {playerId}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"⚠ PawnUniqueID {persistentId} = UNRESOLVED (no player found)");
                             }
                         }
                         else
                         {
-                            LogVerbose($"⚠ PawnUniqueID {persistentId} already mapped");
+                            Console.WriteLine($"⚠ PawnUniqueID {persistentId} already mapped");
                         }
                     }
-                    else if (persistentId == 0)
-                    {
-                        LogVerbose($"⚠ PawnUniqueID is 0 (invalid) - skipping mapping");
-                    }
-                    else
-                    {
-                        LogVerbose($"⚠ PawnUniqueID value cannot be converted to short");
-                    }
                 }
+
             }
             catch (Exception ex)
             {
-                LogVerbose($"✗ Error reading PawnUniqueID: {ex.Message}");
+                Console.WriteLine($"✗ Error reading PawnUniqueID: {ex.Message}");
             }
         }
         else
         {
-            LogVerbose($"⚠ PawnUniqueID property not found");
+            Console.WriteLine($"⚠ PawnUniqueID property not found");
         }
 
         // Track player position for build ownership
@@ -4336,18 +4496,21 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     public async Task ExportPlayerStatsToCSVAsync(string filePath)
     {
+        MapPlayerStatesForBuildTracking();
+
         var csvLines = new List<string>();
         var replayId = Path.GetFileNameWithoutExtension(filePath).Replace("player_stats_", "");
 
         var headers = new List<string>
-    {
-        "ReplayID", "EpicID", "PlayerName",
-        "Eliminations", "WasRebooted",
-        "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
-        "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
-        "DamageDealt", "DamageTaken", "ShotsHit",
-        "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions"
-    };
+{
+    "ReplayID", "EpicID", "PlayerName",
+    "Eliminations", "WasRebooted",
+    "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
+    "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
+    "DamageDealt", "DamageTaken", "ShotsHit",
+    "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions",
+    "BuildCountByOwnerPersistentID"
+};
 
         csvLines.Add(string.Join(",", headers));
 
@@ -4356,7 +4519,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         allPlayerIds.UnionWith(DamageTracker.PlayerStats.Keys);
         allPlayerIds.UnionWith(HarvestTracker.GetAllPlayerStats().Keys);
         allPlayerIds.UnionWith(BuildTracker.GetAllPlayerStats().Keys);
-        // ✅ IMPORTANT: Also include players from elimination tracking
         allPlayerIds.UnionWith(Builder.GetAllEliminationCounts().Keys);
 
         LogVerbose($"Processing {allPlayerIds.Count} unique players...");
@@ -4375,23 +4537,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 row.Add("\"\"");
             }
 
-            //var finalAthenaKills = ExtractFinalAthenaKills();
-
-            // ✅ Use KillScore from Builder (source of truth from replay) instead of kill feed parsing
             var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId)
-    ? Builder.GetEliminationCounts()[playerId]
-    : 0;
-            // ✅ Add eliminations/reboot FIRST (matches headers order)
-            var eliminations_OG = Builder.GetFinalKillScores().ContainsKey(playerId)
-                ? Builder.GetFinalKillScores()[playerId]
-
-
+                ? Builder.GetEliminationCounts()[playerId]
                 : 0;
             var wasRebooted = Builder.WasPlayerRebooted(playerId) ? 1 : 0;
             row.Add(eliminations.ToString());
             row.Add(wasRebooted.ToString());
 
-            // ✅ Then add builds
             var buildStats = BuildTracker.GetPlayerStats(playerId);
             row.Add(buildStats.TotalBuildsPlaced.ToString());
             row.Add(buildStats.WoodBuilds.ToString());
@@ -4404,7 +4556,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             row.Add(buildStats.BuildsEdited.ToString());
             row.Add(buildStats.BuildsDestroyed.ToString());
 
-            // ✅ Then add damage
             var damageStats = DamageTracker.PlayerStats.ContainsKey(playerId)
                 ? DamageTracker.PlayerStats[playerId]
                 : null;
@@ -4412,13 +4563,18 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             row.Add(damageStats?.TotalDamageTaken.ToString() ?? "0");
             row.Add(damageStats?.ShotsHit.ToString() ?? "0");
 
-            // ✅ Finally add harvest
             var harvestStats = HarvestTracker.GetPlayerStats(playerId);
             row.Add(harvestStats.TotalMaterialsHarvested.ToString());
             row.Add(harvestStats.WoodHarvested.ToString());
             row.Add(harvestStats.StoneHarvested.ToString());
             row.Add(harvestStats.MetalHarvested.ToString());
             row.Add(harvestStats.HarvestActions.ToString());
+
+            // ✅ Add builds by owner persistent ID for this player
+            var buildCountForPlayer = _buildCountByOwnerPersistentId
+                .Where(kvp => _ownerPersistentIdToEpicId.TryGetValue(kvp.Key, out var id) && id.Equals(playerId, StringComparison.OrdinalIgnoreCase))
+                .Sum(kvp => kvp.Value);
+            row.Add(buildCountForPlayer.ToString());
 
             csvLines.Add(string.Join(",", row));
         }

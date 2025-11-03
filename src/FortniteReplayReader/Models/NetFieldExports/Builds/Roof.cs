@@ -41,3 +41,8 @@ public class MetalRoof : BaseBuild
     [NetFieldExport("BuildingReplacementType", RepLayoutCmdType.Enum)]
     public int? BuildingReplacementType { get; set; }
 }
+
+[NetFieldExportGroup("/Game/Building/ActorBlueprints/Player/Stone/L1/PBWA_S1_RoofD.PBWA_S1_RoofD_C", minimalParseMode: ParseMode.Minimal)]
+public class StoneRoofDome : BaseBuild
+{
+}

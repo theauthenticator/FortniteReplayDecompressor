@@ -75,6 +75,8 @@ public class FortniteReplayBuilder
     private readonly Dictionary<uint, HealthSet> _previousHealthSets = new();
     private readonly Dictionary<uint, string> _channelToPlayerId = new();
 
+    private Dictionary<uint, string> _buildChannelToPlayerId = new();
+
     private readonly Dictionary<uint, uint> _actorToChannel = new();
     private readonly Dictionary<uint, uint> _channelToActor = new();
 
@@ -93,7 +95,7 @@ public class FortniteReplayBuilder
         return KillFeed;
     }
     private readonly HashSet<uint> _onlySpectatingPlayers = new();
-    private readonly Dictionary<uint, PlayerData> _players = new();
+    public readonly Dictionary<uint, PlayerData> _players = new();
     private readonly Dictionary<int?, TeamData> _teams = new();
     private readonly Dictionary<uint, Llama> _llamas = new();
     private readonly Dictionary<int, RebootVan> _rebootVans = new();
@@ -676,6 +678,30 @@ public class FortniteReplayBuilder
     }
 
 
+    public void MapBuildChannelToPlayer(uint buildChannelIndex, string playerId)
+    {
+        Console.WriteLine("[DEBUG] Current BuildChannel → PlayerId mappings:");
+
+        foreach (var kvp in _buildChannelToPlayerId)
+        {
+            Console.WriteLine($"  [DEBUG] Channel {kvp.Key} → Player {kvp.Value}");
+        }
+
+        Console.WriteLine($"[DEBUG] Mapping buildChannelIndex {buildChannelIndex} to playerId '{playerId}'");
+
+        if (!string.IsNullOrEmpty(playerId))
+        {
+            _buildChannelToPlayerId[buildChannelIndex] = playerId;
+            Console.WriteLine($"[DEBUG] Mapped successfully: {buildChannelIndex} → {playerId}");
+        }
+        else
+        {
+            Console.WriteLine($"[DEBUG] Skipped mapping for channel {buildChannelIndex} (playerId was null or empty)");
+        }
+    }
+
+
+
 
     /// <summary>
     /// Print all elimination events in chronological order for debugging
@@ -843,6 +869,13 @@ public class FortniteReplayBuilder
     /// </summary>
     public string GetPlayerIdFromAnyChannel(uint channelIndex)
     {
+
+        // Method 0: Build channel lookup (NEW)
+        if (_buildChannelToPlayerId.TryGetValue(channelIndex, out var buildPlayerId))
+        {
+            return buildPlayerId;
+        }
+
         // Method 1: Direct lookup in players (state channels)
         if (_players.TryGetValue(channelIndex, out var playerData))
         {
@@ -1973,7 +2006,7 @@ public class FortniteReplayBuilder
         return playerId.Substring(0, Math.Min(8, playerId.Length)) + "...";
     }
 
-    private string ResolveActorIdToPlayerId(uint actorId)
+    public string ResolveActorIdToPlayerId(uint actorId)
     {
         // Method 1: Use the ActorId lookup if available
         if (_actorIdToPlayerId != null && _actorIdToPlayerId.TryGetValue(actorId, out var playerIdFromActor))
@@ -2389,6 +2422,12 @@ public class FortniteReplayBuilder
     {
 
         var playerId = GetPlayerIdFromChannel(channelIndex);
+
+        if (!string.IsNullOrEmpty(playerId) && !_channelToPlayerId.ContainsKey(channelIndex))
+        {
+            _channelToPlayerId[channelIndex] = playerId;
+            Console.WriteLine($"✅ Mapped Channel {channelIndex} → PlayerId {playerId}");
+        }
 
         if (playerId == null)
         {
@@ -2986,7 +3025,7 @@ public class FortniteReplayBuilder
 
 
     /// <summary>
-    /// Get the player ID associated with a channel
+    /// Get the player ID associated with a channel in Builder
     /// </summary>
     public string GetPlayerIdFromChannel(uint channelIndex)
     {
