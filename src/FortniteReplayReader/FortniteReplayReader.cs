@@ -113,7 +113,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     private Dictionary<string, string> activeKnocks = new Dictionary<string, string>();
     private Dictionary<string, int> eliminationCounts = new Dictionary<string, int>();
 
-    private Dictionary<short, string> persistentIdToPlayerId = new(); // WorldPlayerId -> Internal PlayerId
+
     private Dictionary<string, string> playerIdToEpicId = new(); // Internal PlayerId -> Epic Account ID
 
     // Channel and export analysis
@@ -332,327 +332,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         epicAccessToken = accessToken;
     }
-    /*
-        public void ProcessEliminationsFromKillFeed()
-        {
-            Console.WriteLine($"\n{new string('=', 80)}");
-            Console.WriteLine($"PROCESSING ELIMINATIONS FROM KILLFEED");
-            Console.WriteLine($"{new string('=', 80)}\n");
 
-            var rawKillFeed = Builder.GetKillFeed();
-            Console.WriteLine($"Total KillFeed entries (raw): {rawKillFeed.Count}");
-
-            var killFeed = rawKillFeed
-                .GroupBy(e => new
-                {
-                    Victim = e.PlayerName,
-                    Attacker = GetPlayerIdFromActor(e.FinisherOrDownerActorId),
-                    Timestamp = e.ReplicatedWorldTimeSecondsDouble,
-                    IsDowned = e.IsDowned
-                })
-                .Select(g => g.Last())
-                .OrderBy(e => e.ReplicatedWorldTimeSecondsDouble)
-                .ToList();
-
-            Console.WriteLine($"Total KillFeed entries (after dedup): {killFeed.Count}");
-            Console.WriteLine($"Duplicates removed: {rawKillFeed.Count - killFeed.Count}\n");
-
-            // Build elimination timeline for helper functions
-            var eliminationTimeline = killFeed
-                .Where(e => !e.IsDowned)
-                .Select(e => (
-                    victimId: e.PlayerName,
-                    attackerId: GetPlayerIdFromActor(e.FinisherOrDownerActorId),
-                    timestamp: e.ReplicatedWorldTimeSecondsDouble ?? 0.0
-                ))
-                .OrderBy(e => e.timestamp)
-                .ToList();
-
-            // Sequential state tracking
-            var mostRecentKnocker = new Dictionary<string, (string knockerId, double timestamp)>(StringComparer.OrdinalIgnoreCase);
-            var playerEliminated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var processedEntries = new HashSet<string>();
-            var eliminationCounts = new Dictionary<string, int>();
-            var skipped = 0;
-
-            foreach (var entry in killFeed)
-            {
-                var entryId = $"{entry.ReplicatedWorldTimeSecondsDouble}_{entry.PlayerName}_{entry.IsDowned}";
-                if (!processedEntries.Add(entryId))
-                    continue;
-
-                var victimId = entry.PlayerName;
-                var attackerId = GetPlayerIdFromActor(entry.FinisherOrDownerActorId);
-                var timestamp = entry.ReplicatedWorldTimeSecondsDouble ?? 0.0;
-
-                // KNOCK EVENT
-                if (entry.IsDowned)
-                {
-                    if (attackerId == "Unknown" || victimId.Equals(attackerId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        skipped++;
-                        continue;
-                    }
-
-                    // Check if victim already has a prior knock
-                    if (mostRecentKnocker.ContainsKey(victimId))
-                    {
-                        var prevKnocker = mostRecentKnocker[victimId];
-
-                        // If victim was eliminated between knocks, they rebooted
-                        if (playerEliminated.Contains(victimId))
-                        {
-                            Console.WriteLine($"🔄 REBOOT: {GetPlayerName(victimId)} rebooted, new knock chain");
-                            playerEliminated.Remove(victimId);
-                        }
-                        else
-                        {
-                            // REVIVE: Re-knocked without elimination
-                            Console.WriteLine($"🔄 REVIVE: {GetPlayerName(victimId)} revived, {GetPlayerName(prevKnocker.knockerId)}'s knock CLEARED");
-                        }
-                    }
-
-                    mostRecentKnocker[victimId] = (attackerId, timestamp);
-                    Console.WriteLine($"👊 KNOCK: {GetPlayerName(attackerId)} knocked {GetPlayerName(victimId)}");
-                }
-                // ELIMINATION EVENT
-                else
-                {
-                    if (attackerId == "Unknown" || victimId.Equals(attackerId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        skipped++;
-                        continue;
-                    }
-
-                    string creditPlayerId = null;
-                    Console.WriteLine($"\n⚰️ ELIMINATION: {GetPlayerName(victimId)}");
-
-                    // Check if this victim was directly knocked
-                    if (mostRecentKnocker.TryGetValue(victimId, out var recentKnock))
-                    {
-                        var knockerId = recentKnock.knockerId;
-                        Console.WriteLine($"   Prior knock: {GetPlayerName(knockerId)}");
-
-                        // Knocker gets credit if their team is alive
-                        if (IsPlayerOrTeammateAliveAtTimestamp(knockerId, eliminationTimeline, timestamp))
-                        {
-                            creditPlayerId = knockerId;
-                            Console.WriteLine($"   ✅ Knock credit: {GetPlayerName(knockerId)}'s team alive");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"   ❌ No credit: {GetPlayerName(knockerId)}'s team dead");
-                        }
-
-                        mostRecentKnocker.Remove(victimId);
-                    }
-                    // Check if a TEAMMATE was recently knocked (e.g., Pollo knocks A, finishes A's teammate B)
-                    else
-                    {
-                        var teammates = Builder.GetAllPlayers()
-                            .Where(p => IsOnSameTeam(victimId, p.PlayerId, null, timestamp))
-                            .Select(p => p.PlayerId)
-                            .ToList();
-
-
-                        Console.WriteLine($"   Checking teammates for {victimId}");
-                        Console.WriteLine($"   Found {teammates.Count} teammates: {string.Join(", ", teammates)}");
-
-                        var recentTeammateKnocks = teammates
-                            .Where(t => mostRecentKnocker.ContainsKey(t))
-                            .Select(t => (teammate: t, knock: mostRecentKnocker[t]))
-                            .Where(x => IsPlayerOrTeammateAliveAtTimestamp(x.knock.knockerId, eliminationTimeline, timestamp))
-                            .ToList();
-
-                        if (recentTeammateKnocks.Any())
-                        {
-                            // Most recent teammate knock gets the credit
-                            var knockerInfo = recentTeammateKnocks.Last();
-                            creditPlayerId = knockerInfo.knock.knockerId;
-                            Console.WriteLine($"   Teammate {GetPlayerName(knockerInfo.teammate)} was knocked by {GetPlayerName(creditPlayerId)}");
-                            Console.WriteLine($"   ✅ Knock credit: {GetPlayerName(creditPlayerId)} (via teammate knock)");
-
-                            // Clear the teammate's knock since it led to an elimination
-                            mostRecentKnocker.Remove(knockerInfo.teammate);
-                        }
-                        else
-                        {
-                            // Direct elimination
-                            creditPlayerId = attackerId;
-                            Console.WriteLine($"   ✅ Direct credit: {GetPlayerName(attackerId)}");
-                        }
-                    }
-
-                    // Award the elimination
-                    if (creditPlayerId != null && creditPlayerId != "Unknown")
-                    {
-                        if (!eliminationCounts.ContainsKey(creditPlayerId))
-                            eliminationCounts[creditPlayerId] = 0;
-
-                        eliminationCounts[creditPlayerId]++;
-                        ElimTracker.RecordElimination(creditPlayerId, victimId, timestamp, "elimination", null);
-                        Console.WriteLine($"   🎯 AWARDED to {GetPlayerName(creditPlayerId)}");
-                    }
-
-                    playerEliminated.Add(victimId);
-                }
-            }
-
-            Console.WriteLine($"\n{new string('=', 80)}");
-            Console.WriteLine($"SUMMARY");
-            Console.WriteLine($"{new string('=', 80)}");
-            Console.WriteLine($"Total eliminations awarded: {eliminationCounts.Values.Sum()}");
-            Console.WriteLine($"Skipped: {skipped}");
-            Console.WriteLine($"\n🎯 FINAL COUNTS:");
-
-            foreach (var kvp in eliminationCounts.OrderByDescending(x => x.Value))
-            {
-                Console.WriteLine($" {GetPlayerName(kvp.Key)}: {kvp.Value}");
-            }
-
-            Console.WriteLine($"\n{new string('=', 80)}\n");
-
-            ElimTracker.PrintSummary();
-        }
-
-        /// <summary>
-        /// Build a timeline of reboot events for validation
-        /// A reboot is when a player:
-        /// 1. Was fully eliminated (appears with IsRevived BUT NOT IsDowned)
-        /// 2. Is brought back via Reboot Van (RebootCounter increases)
-        /// </summary>
-        private Dictionary<string, List<double>> BuildRebootTimeline(List<KillFeedEntry> killFeed)
-        {
-            var rebootTimeline = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
-
-            // Track eliminations to verify reboots are after full eliminations
-            var eliminations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var entry in killFeed.OrderBy(e => e.ReplicatedWorldTimeSecondsDouble))
-            {
-                var playerId = entry.PlayerName;
-                var timestamp = entry.ReplicatedWorldTimeSecondsDouble ?? 0.0;
-
-                // Track full eliminations (not downed, not revived)
-                if (!entry.IsDowned && !entry.IsRevived)
-                {
-                    eliminations.Add(playerId);
-                }
-
-                // Detect reboot: IsRevived flag on a non-knock event (full elimination reversal)
-                // This happens when RebootCounter increases
-                if (entry.IsRevived && !entry.IsDowned)
-                {
-                    if (!rebootTimeline.ContainsKey(playerId))
-                    {
-                        rebootTimeline[playerId] = new List<double>();
-                    }
-
-                    rebootTimeline[playerId].Add(timestamp);
-                    eliminations.Remove(playerId); // They're back in the game
-                    Console.WriteLine($"🔄 REBOOT DETECTED: {GetPlayerName(playerId)} at {timestamp:F2}s (RebootCounter increased)");
-                }
-            }
-
-            return rebootTimeline;
-        }
-
-        private bool IsPlayerOrTeammateAliveAtTimestamp(string playerId, List<(string victimId, string attackerId, double timestamp)> eliminationTimeline, double checkTimestamp)
-        {
-            var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
-            if (playerData == null) return false;
-
-            int? teamIndex = playerData.TeamIndex;
-            var teammates = Builder.GetAllPlayers().Where(p => p.TeamIndex == teamIndex).ToList();
-
-            foreach (var teammate in teammates)
-            {
-                // Get ALL eliminations for this teammate
-                var elimsForTeammate = eliminationTimeline
-                    .Where(e => e.victimId.Equals(teammate.PlayerId, StringComparison.OrdinalIgnoreCase))
-                    .OrderBy(e => e.timestamp)
-                    .ToList();
-
-                // Find the FINAL (last) elimination
-                var finalElim = elimsForTeammate.LastOrDefault();
-
-                // Teammate is alive if:
-                // 1. They were never eliminated, OR
-                // 2. Their final elimination is AFTER the check timestamp
-                if (finalElim.timestamp == 0 || finalElim.timestamp >= checkTimestamp)
-                {
-                    return true; // Team has at least one alive member
-                }
-            }
-
-            return false; // All teammates have final eliminations before checkTimestamp
-        }
-
-        private bool IsOnSameTeam(string playerId1, string playerId2, HashSet<string> eliminatedPlayers, double timestamp)
-        {
-            var team1 = GetPlayerTeamIndex(playerId1);
-            var team2 = GetPlayerTeamIndex(playerId2);
-            return team1 == team2 && team1 != -1;
-        }
-
-
-
-
-        private bool IsPlayerOrTeammateAlive(string playerId, HashSet<string> eliminatedPlayers, double currentTime)
-        {
-            Console.WriteLine($"      🔎 Checking team status for {GetPlayerName(playerId)} at {currentTime:F2}s");
-
-            // Get the player's team index from all players
-            var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
-
-            if (playerData == null)
-            {
-                Console.WriteLine($"      ⚠️  Could not find PlayerData for {playerId}");
-                return false;
-            }
-
-            int? teamIndex = playerData.TeamIndex;
-            Console.WriteLine($"      Team Index: {teamIndex}");
-
-            // Get all teammates
-            var teammates = Builder.GetAllPlayers().Where(p => p.TeamIndex == teamIndex).ToList();
-            Console.WriteLine($"      Total teammates (including self): {teammates.Count}");
-
-            // Check if any teammate is still alive
-            int aliveCount = 0;
-            foreach (var teammate in teammates)
-            {
-                bool isAlive = !eliminatedPlayers.Contains(teammate.PlayerId);
-                Console.WriteLine($"        - {GetPlayerName(teammate.PlayerId)}: {(isAlive ? "ALIVE ✓" : "DEAD ✗")}");
-                if (isAlive) aliveCount++;
-            }
-
-            bool teamAlive = aliveCount > 0;
-            Console.WriteLine($"      Team status: {aliveCount} alive, Team is {(teamAlive ? "ALIVE" : "DEAD")}");
-
-            return teamAlive;
-        }
-
-        private string GetPlayerIdFromName(string playerName)
-        {
-            if (string.IsNullOrEmpty(playerName))
-                return null;
-
-            try
-            {
-                var playerData = Builder.GetAllPlayers()
-                    .FirstOrDefault(p => p.PlayerName != null &&
-                                       p.PlayerName.Equals(playerName, StringComparison.OrdinalIgnoreCase));
-
-                return playerData?.PlayerId;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-         */
 
     private void LogElimination(string message)
     {
@@ -683,7 +363,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         }
         catch (Exception ex)
         {
-            //Console.WriteLine($"Warning: Could not create elimination log: {ex.Message}");
+            //LogVerbose($"Warning: Could not create elimination log: {ex.Message}");
         }
 
 
@@ -716,11 +396,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
         }
 
-        Console.WriteLine("\n=== FINAL ATHENAKILLS (from replay) ===");
+        LogVerbose("\n=== FINAL ATHENAKILLS (from replay) ===");
         foreach (var (playerId, kills) in finalKills.OrderByDescending(x => x.Value))
         {
             var playerName = GetPlayerNameFromReplay(playerId);
-            Console.WriteLine($"{playerName}: {kills}");
+            LogVerbose($"{playerName}: {kills}");
         }
 
         return finalKills;
@@ -728,19 +408,19 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private void ExtractAndPrintFinalAthenaKills()
     {
-        Console.WriteLine($"\n=== ATHENAKILLS COVERAGE ANALYSIS ===");
-        Console.WriteLine($"Total players in replay: {playerRealtimeStats.Count}");
+        LogVerbose($"\n=== ATHENAKILLS COVERAGE ANALYSIS ===");
+        LogVerbose($"Total players in replay: {playerRealtimeStats.Count}");
 
         var withAthenaKills = playerRealtimeStats.Where(p => p.Value.ContainsKey("AthenaKills")).ToList();
         var withoutAthenaKills = playerRealtimeStats.Where(p => !p.Value.ContainsKey("AthenaKills")).ToList();
 
-        Console.WriteLine($"Players WITH AthenaKills stat: {withAthenaKills.Count}");
-        Console.WriteLine($"Players WITHOUT AthenaKills stat: {withoutAthenaKills.Count}");
+        LogVerbose($"Players WITH AthenaKills stat: {withAthenaKills.Count}");
+        LogVerbose($"Players WITHOUT AthenaKills stat: {withoutAthenaKills.Count}");
 
-        Console.WriteLine($"\nPlayers missing AthenaKills:");
+        LogVerbose($"\nPlayers missing AthenaKills:");
         foreach (var player in withoutAthenaKills.Take(20))
         {
-            Console.WriteLine($"  - {GetPlayerNameFromReplay(player.Key)}");
+            LogVerbose($"  - {GetPlayerNameFromReplay(player.Key)}");
         }
     }
     public FortniteReplay ReadReplay(Stream stream)
@@ -752,57 +432,57 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         try
         {
-            Console.WriteLine("[READREPLAY_START]");
+            LogVerbose("[READREPLAY_START]");
             ReadReplay(archive);
-            Console.WriteLine("[READREPLAY_COMPLETE]");
+            LogVerbose("[READREPLAY_COMPLETE]");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[READREPLAY_CRASH] {ex.Message}");
+            LogVerbose($"[READREPLAY_CRASH] {ex.Message}");
             LogVerbose($"CRASH during replay reading: {ex}");
             LogVerbose($"Stack: {ex.StackTrace}");
             throw;
         }
 
-        Console.WriteLine("[BUILDING_REPLAY]");
+        LogVerbose("[BUILDING_REPLAY]");
         var replay = Builder.Build(Replay);
         replay.DamageSummary = DamageTracker.GetDamageSummary();
 
-        Console.WriteLine("[POSTPROCESSING_HARVESTS]");
+        LogVerbose("[POSTPROCESSING_HARVESTS]");
         PostProcessHarvestHits();
 
-        Console.WriteLine("[UPDATING_KILLFEED]");
+        LogVerbose("[UPDATING_KILLFEED]");
         Builder.UpdateKillFeedWithNames();
         Builder.SetPlayerInfo(playerInfoByPlayerId);
         PrintEliminationsSummaryWithNames();
 
-        Console.WriteLine("[EVALUATING_ELIMINATIONS]");
+        LogVerbose("[EVALUATING_ELIMINATIONS]");
         var elimCredits = EvaluateEliminationsFromEvents();
         Builder.SetEliminationCredits(elimCredits);
 
-        Console.WriteLine($"[DEBUG] Total builds tracked by OwnerPersistentID: {_buildCountByOwnerPersistentId.Count}");
-        Console.WriteLine($"[DEBUG] Total unique OwnerPersistentIDs: {_buildCountByOwnerPersistentId.Keys.Count}");
+        LogVerbose($"[DEBUG] Total builds tracked by OwnerPersistentID: {_buildCountByOwnerPersistentId.Count}");
+        LogVerbose($"[DEBUG] Total unique OwnerPersistentIDs: {_buildCountByOwnerPersistentId.Keys.Count}");
 
-        Console.WriteLine("[PRINTING_ANALYSIS]");
+        LogVerbose("[PRINTING_ANALYSIS]");
         PrintStructuralAnalysis();
         PrintEventSummary();
 
-        Console.WriteLine("[PRINTING_SUMMARIES]");
+        LogVerbose("[PRINTING_SUMMARIES]");
         BuildTracker.PrintBuildSummary();
         BuildTracker.PrintSanityChecks();
         BuildTracker.PrintPlayerIdMappings();
         HarvestTracker.PrintHarvestSummary();
 
-        Console.WriteLine("[BEFORE_LOGBUILDCOUNTS]");
+        LogVerbose("[BEFORE_LOGBUILDCOUNTS]");
         LogBuildCountsByOwner();
         MapPlayerStatesForBuildTracking();
-        Console.WriteLine("[AFTER_LOGBUILDCOUNTS]");
+        LogVerbose("[AFTER_LOGBUILDCOUNTS]");
 
-        Console.WriteLine("[EXPORTING_UNKNOWNS]");
+        LogVerbose("[EXPORTING_UNKNOWNS]");
         var unknownHarvestablesPath = "unknown_harvestables.csv";
         ExportUnknownHarvestables(unknownHarvestablesPath);
 
-        Console.WriteLine("[READREPLAY_FINISHED]");
+        LogVerbose("[READREPLAY_FINISHED]");
         return replay;
     }
 
@@ -831,8 +511,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     public void PrintEliminationsSummaryWithNames()
     {
-        Console.WriteLine($"\n≡ƒôê ELIMINATION EVENTS SUMMARY:");
-        Console.WriteLine($"   Total eliminations parsed: {_parsedEliminations.Count}\n");
+        LogVerbose($"\n≡ƒôê ELIMINATION EVENTS SUMMARY:");
+        LogVerbose($"   Total eliminations parsed: {_parsedEliminations.Count}\n");
 
         for (int i = 0; i < _parsedEliminations.Count; i++)
         {
@@ -843,10 +523,10 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             var eliminatedName = GetPlayerNameFromReplay(eliminatedId) ?? eliminatedId;
             var eliminatorName = GetPlayerNameFromReplay(eliminatorId) ?? eliminatorId;
 
-            Console.WriteLine($"   [{i + 1}] {action} @ {time:F2}s: {eliminatedName} by {eliminatorName}");
+            LogVerbose($"   [{i + 1}] {action} @ {time:F2}s: {eliminatedName} by {eliminatorName}");
         }
 
-        Console.WriteLine($"\n   ✅ Summary complete\n");
+        LogVerbose($"\n   ✅ Summary complete\n");
     }
 
     private Dictionary<string, List<double>> GetPlayerReboots()
@@ -890,8 +570,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     /// </summary>
     public Dictionary<string, int> EvaluateEliminationsFromEvents()
     {
-        Console.WriteLine($"\n≡ƒôì EVALUATING ELIMINATIONS FROM EVENTS (WITH STALE KNOCKER CLEARING):");
-        Console.WriteLine($"   Total eliminations to process: {_parsedEliminations.Count}\n");
+        LogVerbose($"\n≡ƒôì EVALUATING ELIMINATIONS FROM EVENTS (WITH STALE KNOCKER CLEARING):");
+        LogVerbose($"   Total eliminations to process: {_parsedEliminations.Count}\n");
 
         var mostRecentKnocker = new Dictionary<string, (string knockerId, double knockTime)>();
         var playerEliminatedTime = new Dictionary<string, double>();
@@ -917,18 +597,18 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 // NEW: Ignore self-knockdowns (player knocked themselves)
                 if (eliminatorId == eliminatedId)
                 {
-                    Console.WriteLine($"   [{processedCount}] SELF-KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} (IGNORED - thirsted finish will get credit)");
+                    LogVerbose($"   [{processedCount}] SELF-KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} (IGNORED - thirsted finish will get credit)");
                     continue;  // Skip self-knocks, don't store as a valid knocker
                 }
 
                 // 🔴 KNOCKDOWN EVENT: Store this as the most recent knocker
                 mostRecentKnocker[eliminatedId] = (eliminatorId, time);
-                Console.WriteLine($"   [{processedCount}] KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
+                LogVerbose($"   [{processedCount}] KNOCK @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
             }
             else
             {
                 // 🟢 ELIMINATION EVENT: Evaluate for credit
-                Console.WriteLine($"   [{processedCount}] ELIM @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
+                LogVerbose($"   [{processedCount}] ELIM @ {time:F2}s: {GetPlayerNameFromReplay(eliminatedId)} by {GetPlayerNameFromReplay(eliminatorId)}");
 
                 playerEliminatedTime[eliminatedId] = time;
 
@@ -942,7 +622,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     var reviveAfterKnock = reviveTimes.FirstOrDefault(reviveTime => reviveTime > knockTime && reviveTime < time);
                     if (reviveAfterKnock > 0)
                     {
-                        Console.WriteLine($"      Cleared stale knocker: {GetPlayerNameFromReplay(knockerId)} @ {knockTime:F2}s (revived @ {reviveAfterKnock:F2}s)");
+                        LogVerbose($"      Cleared stale knocker: {GetPlayerNameFromReplay(knockerId)} @ {knockTime:F2}s (revived @ {reviveAfterKnock:F2}s)");
                         mostRecentKnocker.Remove(eliminatedId);
                     }
                 }
@@ -953,7 +633,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     var knockerName = GetPlayerNameFromReplay(knockerId);
                     var knockerTeam = playerTeams.ContainsKey(knockerId) ? playerTeams[knockerId] : -1;
 
-                    Console.WriteLine($"      → Knocker: {knockerName} (Team {knockerTeam}) @ {knockTime:F2}s");
+                    LogVerbose($"      → Knocker: {knockerName} (Team {knockerTeam}) @ {knockTime:F2}s");
 
                     // Check if victim was revived between knock and elimination
                     bool wasRevived = playerRevives.ContainsKey(eliminatedId) &&
@@ -961,7 +641,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
                     if (wasRevived)
                     {
-                        Console.WriteLine($"      ❌ REVIVED between knock ({knockTime:F2}s) and elim ({time:F2}s)");
+                        LogVerbose($"      ❌ REVIVED between knock ({knockTime:F2}s) and elim ({time:F2}s)");
                         revivedCount++;
                         mostRecentKnocker.Remove(eliminatedId);
                     }
@@ -978,12 +658,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
                         if (knockerWasDeadBeforeElim && knockerRebooted)
                         {
-                            Console.WriteLine($"      ❌ NO CREDIT - Knocker was dead and rebooted AFTER elimination");
+                            LogVerbose($"      ❌ NO CREDIT - Knocker was dead and rebooted AFTER elimination");
                             teamDeadCount++;
                         }
                         else if (knockerTeam >= 0 && teamAlive)
                         {
-                            Console.WriteLine($"      ✅ CREDIT awarded to {knockerName} (team alive)");
+                            LogVerbose($"      ✅ CREDIT awarded to {knockerName} (team alive)");
                             creditedCount++;
 
                             if (!eliminationCredits.ContainsKey(knockerId))
@@ -992,7 +672,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                         }
                         else
                         {
-                            Console.WriteLine($"      ❌ NO CREDIT - Knocker's team dead at {time:F2}s");
+                            LogVerbose($"      ❌ NO CREDIT - Knocker's team dead at {time:F2}s");
                             teamDeadCount++;
                         }
 
@@ -1005,11 +685,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     var eliminatorTeam = playerTeams.ContainsKey(eliminatorId) ? playerTeams[eliminatorId] : -1;
                     bool eliminatorTeamAlive = IsTeammateAliveAtTime(eliminatorTeam, time, playerTeams, playerEliminatedTime, playerRevives);
 
-                    Console.WriteLine($"      → Eliminator: {GetPlayerNameFromReplay(eliminatorId)} (Team {eliminatorTeam})");
+                    LogVerbose($"      → Eliminator: {GetPlayerNameFromReplay(eliminatorId)} (Team {eliminatorTeam})");
 
                     if (eliminatorTeam >= 0 && eliminatorTeamAlive)
                     {
-                        Console.WriteLine($"      ✅ CREDIT awarded to {GetPlayerNameFromReplay(eliminatorId)} (direct elim, team alive)");
+                        LogVerbose($"      ✅ CREDIT awarded to {GetPlayerNameFromReplay(eliminatorId)} (direct elim, team alive)");
                         noKnockerCreditedCount++;
 
                         if (!eliminationCredits.ContainsKey(eliminatorId))
@@ -1018,25 +698,25 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     }
                     else
                     {
-                        Console.WriteLine($"      ❌ NO CREDIT - No knocker and eliminator's team dead");
+                        LogVerbose($"      ❌ NO CREDIT - No knocker and eliminator's team dead");
                         noKnockerCount++;
                     }
                 }
 
-                Console.WriteLine();
+                LogVerbose("");
             }
         }
 
-        Console.WriteLine($"\n📊 ELIMINATION BREAKDOWN:");
-        Console.WriteLine($"   Total eliminations: {_parsedEliminations.Count / 2}");
-        Console.WriteLine($"   Credited (knocker): {creditedCount}");
-        Console.WriteLine($"   Credited (direct elim): {noKnockerCreditedCount}");
-        Console.WriteLine($"   Total credited: {creditedCount + noKnockerCreditedCount}");
-        Console.WriteLine($"   ---");
-        Console.WriteLine($"   No knocker (no credit): {noKnockerCount}");
-        Console.WriteLine($"   Team dead at elim: {teamDeadCount}");
-        Console.WriteLine($"   Revived between knock and elim: {revivedCount}");
-        Console.WriteLine();
+        LogVerbose($"\n📊 ELIMINATION BREAKDOWN:");
+        LogVerbose($"   Total eliminations: {_parsedEliminations.Count / 2}");
+        LogVerbose($"   Credited (knocker): {creditedCount}");
+        LogVerbose($"   Credited (direct elim): {noKnockerCreditedCount}");
+        LogVerbose($"   Total credited: {creditedCount + noKnockerCreditedCount}");
+        LogVerbose($"   ---");
+        LogVerbose($"   No knocker (no credit): {noKnockerCount}");
+        LogVerbose($"   Team dead at elim: {teamDeadCount}");
+        LogVerbose($"   Revived between knock and elim: {revivedCount}");
+        LogVerbose("");
 
         PrintFinalCredits(eliminationCredits);
         return eliminationCredits;
@@ -1137,8 +817,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         // Get players from the replay
         var allPlayers = Builder.GetPlayers();
 
-        Console.WriteLine($"\n🔍 DEBUG: Building player team map");
-        Console.WriteLine($"   Total players: {allPlayers.Count}");
+        LogVerbose($"\n🔍 DEBUG: Building player team map");
+        LogVerbose($"   Total players: {allPlayers.Count}");
 
         foreach (var kvp in allPlayers)
         {
@@ -1147,11 +827,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             if (playerData.PlayerId != null && playerData.TeamIndex.HasValue)
             {
                 playerTeams[playerData.PlayerId] = playerData.TeamIndex.Value;
-                Console.WriteLine($"   {GetPlayerNameFromReplay(playerData.PlayerId)}: Team {playerData.TeamIndex}");
+                LogVerbose($"   {GetPlayerNameFromReplay(playerData.PlayerId)}: Team {playerData.TeamIndex}");
             }
         }
 
-        Console.WriteLine($"   Total players with teams: {playerTeams.Count}\n");
+        LogVerbose($"   Total players with teams: {playerTeams.Count}\n");
         return playerTeams;
     }
 
@@ -1214,8 +894,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     /// </summary>
     private void PrintFinalCredits(Dictionary<string, int> eliminationCredits)
     {
-        Console.WriteLine($"\n≡ƒôê FINAL ELIMINATION CREDITS:");
-        Console.WriteLine($"   Total credits awarded: {eliminationCredits.Values.Sum()}\n");
+        LogVerbose($"\n≡ƒôê FINAL ELIMINATION CREDITS:");
+        LogVerbose($"   Total credits awarded: {eliminationCredits.Values.Sum()}\n");
 
         var sortedCredits = eliminationCredits
             .OrderByDescending(k => k.Value)
@@ -1225,10 +905,10 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         foreach (var (playerId, count) in sortedCredits)
         {
             var playerName = GetPlayerNameFromReplay(playerId);
-            Console.WriteLine($"   {playerName}: {count} eliminations");
+            LogVerbose($"   {playerName}: {count} eliminations");
         }
 
-        Console.WriteLine();
+        LogVerbose("");
     }
 
 
@@ -1287,7 +967,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     archetypePath = $"ArchetypeGUID={archetypeGuidValue} (path pending)";
                 }
 
-                Console.WriteLine($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
+                LogVerbose($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
 
 
                 // ✅ ALWAYS tell the builder about this channel-actor mapping
@@ -1507,7 +1187,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
         if (obj == null || depth > 3)
         {
-            Console.WriteLine($"{indent}(null or max depth)");
+            LogVerbose($"{indent}(null or max depth)");
             return;
         }
 
@@ -1516,14 +1196,14 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         // Handle common types
         if (objType.IsPrimitive || objType == typeof(string) || objType == typeof(decimal))
         {
-            Console.WriteLine($"{indent}{obj}");
+            LogVerbose($"{indent}{obj}");
             return;
         }
 
         // Handle enums
         if (objType.IsEnum)
         {
-            Console.WriteLine($"{indent}{obj} ({(int) obj})");
+            LogVerbose($"{indent}{obj} ({(int) obj})");
             return;
         }
 
@@ -1543,68 +1223,68 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
                 if (value == null)
                 {
-                    Console.WriteLine($"{indent}{prop.Name}: NULL");
+                    LogVerbose($"{indent}{prop.Name}: NULL");
                     tracker[fullName].Add("NULL");
                 }
                 else if (prop.PropertyType.IsPrimitive || prop.PropertyType == typeof(string))
                 {
-                    Console.WriteLine($"{indent}{prop.Name}: {value}");
+                    LogVerbose($"{indent}{prop.Name}: {value}");
                     tracker[fullName].Add(value.ToString());
                 }
                 else if (prop.PropertyType.IsEnum)
                 {
-                    Console.WriteLine($"{indent}{prop.Name}: {value} ({(int) value})");
+                    LogVerbose($"{indent}{prop.Name}: {value} ({(int) value})");
                     tracker[fullName].Add($"{value}({(int) value})");
                 }
                 else
                 {
-                    Console.WriteLine($"{indent}{prop.Name} ({prop.PropertyType.Name}):");
+                    LogVerbose($"{indent}{prop.Name} ({prop.PropertyType.Name}):");
                     PrintComplexProperty(value, indent + "  ", tracker, fullName, depth + 1);
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"{indent}{prop.Name}: <ERROR: {ex.Message}>");
+                LogVerbose($"{indent}{prop.Name}: <ERROR: {ex.Message}>");
             }
         }
     }
 
     private void PrintEliminationPropertySummary()
     {
-        Console.WriteLine("\n" + new string('=', 80));
-        Console.WriteLine("ELIMINATION PROPERTY SUMMARY");
-        Console.WriteLine(new string('=', 80));
-        Console.WriteLine($"Total elimination events parsed: {eliminationSamples.Count}");
-        Console.WriteLine($"Unique properties found: {eliminationPropertiesFound.Count}");
-        Console.WriteLine();
+        LogVerbose("\n" + new string('=', 80));
+        LogVerbose("ELIMINATION PROPERTY SUMMARY");
+        LogVerbose(new string('=', 80));
+        LogVerbose($"Total elimination events parsed: {eliminationSamples.Count}");
+        LogVerbose($"Unique properties found: {eliminationPropertiesFound.Count}");
+        LogVerbose("");
 
         foreach (var prop in eliminationPropertiesFound.OrderBy(x => x.Key))
         {
-            Console.WriteLine($"\n{prop.Key}:");
-            Console.WriteLine($"  Unique values: {prop.Value.Count}");
+            LogVerbose($"\n{prop.Key}:");
+            LogVerbose($"  Unique values: {prop.Value.Count}");
 
             // Show samples
             var samples = prop.Value.Take(10).ToList();
             if (samples.Any())
             {
-                Console.WriteLine($"  Sample values:");
+                LogVerbose($"  Sample values:");
                 foreach (var sample in samples)
                 {
-                    Console.WriteLine($"    - {sample}");
+                    LogVerbose($"    - {sample}");
                 }
             }
 
             // Check if always null
             if (prop.Value.Count == 1 && prop.Value.Contains("NULL"))
             {
-                Console.WriteLine($"  ⚠️ ALWAYS NULL across all {eliminationSamples.Count} events");
+                LogVerbose($"  ⚠️ ALWAYS NULL across all {eliminationSamples.Count} events");
             }
         }
 
         // Property availability matrix
-        Console.WriteLine("\n" + new string('-', 80));
-        Console.WriteLine("PROPERTY AVAILABILITY:");
-        Console.WriteLine(new string('-', 80));
+        LogVerbose("\n" + new string('-', 80));
+        LogVerbose("PROPERTY AVAILABILITY:");
+        LogVerbose(new string('-', 80));
 
         foreach (var prop in eliminationPropertiesFound.OrderBy(x => x.Key))
         {
@@ -1613,10 +1293,10 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             var availability = (double) nonNullCount / eliminationSamples.Count * 100;
 
             var status = availability >= 90 ? "✅" : availability >= 50 ? "⚠️" : "❌";
-            Console.WriteLine($"{status} {prop.Key,-40} {availability:F1}% non-null");
+            LogVerbose($"{status} {prop.Key,-40} {availability:F1}% non-null");
         }
 
-        Console.WriteLine("\n" + new string('=', 80) + "\n");
+        LogVerbose("\n" + new string('=', 80) + "\n");
     }
 
 
@@ -1977,9 +1657,21 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     {
 
 
-        // ✅ Capture WorldPlayerId→EpicID mapping from FortPlayerState
+        // ✅ Capture WorldPlayerId→EpicID mapping from FortPlayerState (ALL updates)
         if (exportGroup is FortPlayerState playerState)
         {
+            // ✅ Map actor GUID to player ID for damage tracking
+            if (Channels[channelIndex]?.Actor?.ActorNetGUID != null)
+            {
+                var actorGuid = Channels[channelIndex].Actor.ActorNetGUID.Value;
+                var playerId = Builder.GetPlayerIdFromChannel(channelIndex);
+
+                if (!string.IsNullOrEmpty(playerId) && actorGuid != 0)
+                {
+                    actorGuidToPlayerId[actorGuid] = playerId;
+                }
+            }
+
             if (playerState.WorldPlayerId.HasValue && !string.IsNullOrEmpty(playerState.UniqueID))
             {
                 short worldPlayerId = playerState.WorldPlayerId.Value;
@@ -1989,11 +1681,14 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 if (epicId.Contains("["))
                     epicId = epicId.Split('[')[0].Trim();
 
-                string timeKey = $"{worldPlayerId}_{currentTime:F2}";
-                persistentIdToPlayerId[worldPlayerId] = epicId;
-                persistentIdMappingHistory[timeKey] = epicId;
+                // ✅ Always update the mapping, even if we've seen this WorldPlayerId before
+                Builder.persistentIdToPlayerId[worldPlayerId] = epicId;
 
-                Console.WriteLine($"✅ Mapped WorldPlayerId {worldPlayerId} → {epicId} at {currentTime}s");
+                // Only log on NEW mappings to reduce spam
+                if (!Builder.persistentIdToPlayerId.ContainsKey(worldPlayerId))
+                {
+                    LogVerbose($"✅ Mapped WorldPlayerId {worldPlayerId} → {epicId} at {currentTime}s");
+                }
             }
         }
 
@@ -2055,17 +1750,17 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 break;
 
             case PlayerPawn pawn:
-                Console.WriteLine($"\n=== PLAYER PAWN UPDATE ===");
-                Console.WriteLine($"PawnUniqueID: {pawn.PawnUniqueID}");
+                LogVerbose($"\n=== PLAYER PAWN UPDATE ===");
+                LogVerbose($"PawnUniqueID: {pawn.PawnUniqueID}");
                 Builder.UpdatePlayerPawn(channelIndex, pawn);
                 ProcessPlayerPawn(pawn, channelIndex);
                 PrintObjectProperties(pawn, "PlayerPawn", 0);
                 break;
 
             case PlayerBuild playerBuild:
-                Console.WriteLine($"[DEBUG] PlayerBuild detected");
-                Console.WriteLine($"[DEBUG] Owner: {playerBuild.Owner}");
-                Console.WriteLine($"[DEBUG] Channel: {channelIndex}");
+                LogVerbose($"[DEBUG] PlayerBuild detected");
+                LogVerbose($"[DEBUG] Owner: {playerBuild.Owner}");
+                LogVerbose($"[DEBUG] Channel: {channelIndex}");
                 break;
 
             case FortBroadcastRemoteClientInfo remoteClientInfo:
@@ -2458,6 +2153,27 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             // Metal floors
             case MetalFloor:
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Metal");
+                break;
+
+            case FortSafeZoneIndicatorFuture safeZoneFuture:
+                Console.WriteLine($"\n[SAFEZONE_FUTURE_DEBUG] FortSafeZoneIndicatorFuture properties:");
+                var props = safeZoneFuture.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                foreach (var prop in props)
+                {
+                    try
+                    {
+                        var value = prop.GetValue(safeZoneFuture);
+                        if (value != null)
+                        {
+                            Console.WriteLine($"  {prop.Name}: {value}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"  {prop.Name}: [Error: {ex.Message}]");
+                    }
+                }
+
                 break;
 
             default:
@@ -2871,53 +2587,39 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private int deduplicationHits = 0;
     private Dictionary<short, int> _buildCountByOwnerPersistentId = new();
-
     private void ProcessBuild(uint channelIndex, BaseBuild build, string buildTypeName, string material)
     {
         if (!(build.bPlayerPlaced == true || build.bIsInitiallyBuilding == true))
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bPlayerPlaced={build.bPlayerPlaced}, bIsInitiallyBuilding={build.bIsInitiallyBuilding}");
             return;
         }
 
         if (!build.TeamIndex.HasValue)
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: No TeamIndex");
             return;
         }
 
         var currentTimeValue = Builder.GetCurrentTimeDouble();
         var currentTime = (float) currentTimeValue;
 
-        // ✅ Get actor from channel directly
-        var channel = Channels[channelIndex];
-        var actorGuid = channel?.Actor?.ActorNetGUID?.Value ?? 0;
-
-        Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex}, ActorGuid: {actorGuid}, OwnerPersistentID: {build.OwnerPersistentID?.Value.Value}, Time: {currentTime}s");
-        Console.WriteLine($"[BUILD_CHECK] EditingPlayer: {build.EditingPlayer?.Value}, bDestroyed: {build.bDestroyed}, bIsInitiallyBuilding: {build.bIsInitiallyBuilding}");
-
         if (build.EditingPlayer?.Value > 0)
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: EditingPlayer={build.EditingPlayer?.Value}");
             return;
         }
 
         if (build.bDestroyed == true)
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bDestroyed=true");
             return;
         }
 
         if (build.bIsInitiallyBuilding != true)
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: bIsInitiallyBuilding={build.bIsInitiallyBuilding}");
             return;
         }
 
         short? expectedHealth = GetExpectedInitialHealth(material, buildTypeName);
         if (expectedHealth.HasValue && build.Health != expectedHealth.Value)
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: Health mismatch expected={expectedHealth}, actual={build.Health}");
             return;
         }
 
@@ -2926,60 +2628,82 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         if (processedBuilds.Contains(buildKey))
         {
-            Console.WriteLine($"[BUILD_DEBUG] Channel: {channelIndex} - RETURN: Already processed");
             return;
         }
 
-        // ✅ Track by OwnerPersistentID instead of resolving now
+        // ✅ Use OwnerPersistentID to get Epic ID and record build
         if (build.OwnerPersistentID != null)
         {
             short ownerPersistentId = build.OwnerPersistentID.Value.Value;
 
-            if (!_buildCountByOwnerPersistentId.ContainsKey(ownerPersistentId))
-                _buildCountByOwnerPersistentId[ownerPersistentId] = 0;
+            if (Builder.persistentIdToPlayerId.TryGetValue(ownerPersistentId, out var epicId))
+            {
+                BuildTracker.RecordBuild(
+                    epicId.ToLower(),
+                    material,
+                    buildTypeName,
+                    build.bPlayerPlaced ?? true,
+                    build.bDestroyed ?? false,
+                    build.TeamIndex ?? 0,
+                    build.Health ?? 100,
+                    build.EditingPlayer?.Value,
+                    currentTime,
+                    ownerPersistentId
+                );
 
-            _buildCountByOwnerPersistentId[ownerPersistentId]++;
-
-            Console.WriteLine($"[BUILD_TRACKED] OwnerPersistentID {ownerPersistentId}: {buildTypeName} {material} (Total: {_buildCountByOwnerPersistentId[ownerPersistentId]})");
+                LogVerbose($"[BUILD_RECORDED] {epicId}: {buildTypeName} {material}");
+            }
+            else
+            {
+                LogVerbose($"[BUILD_SKIP] OwnerPersistentID {ownerPersistentId} - No Epic ID mapping found");
+            }
         }
         else
         {
-            Console.WriteLine($"[BUILD_SKIP] Channel {channelIndex} - No OwnerPersistentID");
+            LogVerbose($"[BUILD_SKIP] Channel {channelIndex} - No OwnerPersistentID");
         }
 
         processedBuilds.Add(buildKey);
     }
-
     private void MapPlayerStatesForBuildTracking()
     {
-        Console.WriteLine("\n[BUILD_MAPPING] Mapping OwnerPersistentID to Epic IDs from PlayerData...");
+        LogVerbose("\n[BUILD_MAPPING] Mapping OwnerPersistentID to Epic IDs...");
 
-        foreach (var playerData in Builder._players.Values)
+        // Use the mapping from Builder which captures ALL updates
+        foreach (var kvp in Builder.persistentIdToPlayerId)  // Make this public
         {
-            if (playerData.PlayerNumber.HasValue)
-            {
-                short playerNumber = (short) playerData.PlayerNumber.Value;
-                string epicId = playerData.EpicId ?? playerData.PlatformUniqueNetId ?? playerData.PlayerId ?? "UNKNOWN";
+            _ownerPersistentIdToEpicId[kvp.Key] = kvp.Value;
+        }
 
-                _ownerPersistentIdToEpicId[playerNumber] = epicId;
-                Console.WriteLine($"[BUILD_MAPPING] PlayerNumber {playerNumber} → {epicId}");
+
+        LogVerbose($"[BUILD_MAPPING] From replay data: {_ownerPersistentIdToEpicId.Count} players");
+        LogVerbose($"[BUILD_MAPPING] Builds have {_buildCountByOwnerPersistentId.Count} unique owners");
+
+        // Map remaining owners as UNMAPPED
+        foreach (var ownerPersistentId in _buildCountByOwnerPersistentId.Keys)
+        {
+            if (!_ownerPersistentIdToEpicId.ContainsKey(ownerPersistentId))
+            {
+                _ownerPersistentIdToEpicId[ownerPersistentId] = $"UNMAPPED_{ownerPersistentId}";
             }
         }
 
-        Console.WriteLine($"[BUILD_MAPPING] Mapped {_ownerPersistentIdToEpicId.Count} players\n");
+        LogVerbose($"[BUILD_MAPPING] Final mapped: {_ownerPersistentIdToEpicId.Count} owners\n");
     }
+
+
     public void LogBuildCountsByOwner()
     {
-        Console.WriteLine("\n" + new string('=', 80));
-        Console.WriteLine("📊 BUILD COUNTS BY OWNER PERSISTENT ID");
-        Console.WriteLine(new string('=', 80));
+        LogVerbose("\n" + new string('=', 80));
+        LogVerbose("📊 BUILD COUNTS BY OWNER PERSISTENT ID");
+        LogVerbose(new string('=', 80));
 
         foreach (var kvp in _buildCountByOwnerPersistentId.OrderByDescending(x => x.Value))
         {
-            Console.WriteLine($"  OwnerPersistentID {kvp.Key}: {kvp.Value} builds");
+            LogVerbose($"  OwnerPersistentID {kvp.Key}: {kvp.Value} builds");
         }
 
-        Console.WriteLine(new string('=', 80) + "\n");
+        LogVerbose(new string('=', 80) + "\n");
     }
     private short? GetExpectedInitialHealth(string material, string buildType)
     {
@@ -3004,28 +2728,28 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private string GetEpicIdFromPersistentId(short pawnUniqueId)
     {
-        Console.WriteLine($"[DEBUG] Looking up Epic ID for pawnUniqueId: {pawnUniqueId}");
+        LogVerbose($"[DEBUG] Looking up Epic ID for pawnUniqueId: {pawnUniqueId}");
 
         if (pawnUniqueIdToPlayerId.TryGetValue(pawnUniqueId, out var playerId))
         {
-            Console.WriteLine($"[DEBUG] Found playerId: {playerId}");
+            LogVerbose($"[DEBUG] Found playerId: {playerId}");
 
             if (playerIdToEpicId.TryGetValue(playerId, out var epicId))
             {
-                Console.WriteLine($"[DEBUG] Found epicId: {epicId}");
+                LogVerbose($"[DEBUG] Found epicId: {epicId}");
                 return epicId;
             }
             else
             {
-                Console.WriteLine($"[DEBUG] No epicId found for playerId: {playerId}");
+                LogVerbose($"[DEBUG] No epicId found for playerId: {playerId}");
             }
         }
         else
         {
-            Console.WriteLine($"[DEBUG] No playerId found for pawnUniqueId: {pawnUniqueId}");
+            LogVerbose($"[DEBUG] No playerId found for pawnUniqueId: {pawnUniqueId}");
         }
 
-        Console.WriteLine($"[DEBUG] Returning null for pawnUniqueId: {pawnUniqueId}");
+        LogVerbose($"[DEBUG] Returning null for pawnUniqueId: {pawnUniqueId}");
         return null;
     }
 
@@ -3173,14 +2897,14 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         if (state.PlayerTeam != null)
         {
-            //Console.WriteLine($"PlayerTeam: {state.PlayerTeam}");
+            //LogVerbose($"PlayerTeam: {state.PlayerTeam}");
             var props = state.PlayerTeam.GetType().GetProperties();
             foreach (var prop in props)
             {
                 try
                 {
                     var value = prop.GetValue(state.PlayerTeam);
-                    Console.WriteLine($"  {prop.Name} = {value}");
+                    LogVerbose($"  {prop.Name} = {value}");
                 }
                 catch { }
             }
@@ -3194,7 +2918,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         // ✅ LOG ATHENAKILLS UPDATE
         if (state.AthenaKills.HasValue)
         {
-            //Console.WriteLine($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = {state.AthenaKills.Value}");
+            //LogVerbose($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = {state.AthenaKills.Value}");
             LogVerbose($"   AthenaKills: {state.AthenaKills.Value}");
 
             // Store it in playerRealtimeStats
@@ -3208,7 +2932,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         }
         else
         {
-            //Console.WriteLine($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = NULL");
+            //LogVerbose($"🎯 AthenaKills UPDATE: {playerIdFromBuilder} = NULL");
             LogVerbose($"   AthenaKills: NULL");
         }
 
@@ -3298,45 +3022,45 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var pawnActorGuid = pawnChannel?.Actor?.ActorNetGUID?.Value;
         var playerStateActorGuid = pawn.PlayerState;
 
-        Console.WriteLine($"[PAWN_DEBUG] Channel: {channelIndex}, PawnUniqueID: {pawn.PawnUniqueID}, Actor: {pawnActorGuid}");
+        LogVerbose($"[PAWN_DEBUG] Channel: {channelIndex}, PawnUniqueID: {pawn.PawnUniqueID}, Actor: {pawnActorGuid}");
 
-        Console.WriteLine($"=== PLAYER PAWN on Channel {channelIndex} ===");
-        Console.WriteLine($"Pawn Actor GUID: {pawnActorGuid}");
-        Console.WriteLine($"PlayerState GUID: {playerStateActorGuid}");
+        LogVerbose($"=== PLAYER PAWN on Channel {channelIndex} ===");
+        LogVerbose($"Pawn Actor GUID: {pawnActorGuid}");
+        LogVerbose($"PlayerState GUID: {playerStateActorGuid}");
 
         string? pawnPlayerId = null;
 
         if (pawnActorGuid.HasValue)
         {
-            Console.WriteLine("Looking up pawn actor in builder...");
-            Console.WriteLine($"Pawn Actor GUID: {pawnActorGuid.Value}");
+            LogVerbose("Looking up pawn actor in builder...");
+            LogVerbose($"Pawn Actor GUID: {pawnActorGuid.Value}");
             var pawnPlayerId1 = Builder.ResolveActorIdToPlayerId(pawnActorGuid.Value);
 
             if (pawnPlayerId1 != null)
             {
-                Console.WriteLine($"Builder resolved pawn actor to player ID: {pawnPlayerId1}");
+                LogVerbose($"Builder resolved pawn actor to player ID: {pawnPlayerId1}");
             }
             else
             {
-                Console.WriteLine($"Builder could not resolve pawn actor GUID to player ID");
+                LogVerbose($"Builder could not resolve pawn actor GUID to player ID");
             }
         }
         else
         {
-            Console.WriteLine($"Pawn Actor GUID: NULL");
+            LogVerbose($"Pawn Actor GUID: NULL");
         }
 
         // Try to resolve player ID
         if (pawnActorGuid.HasValue && actorGuidToPlayerId.ContainsKey(pawnActorGuid.Value))
         {
             pawnPlayerId = actorGuidToPlayerId[pawnActorGuid.Value];
-            Console.WriteLine($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via pawn actor GUID: {pawnPlayerId}");
+            LogVerbose($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via pawn actor GUID: {pawnPlayerId}");
         }
 
         else if (playerStateActorGuid.HasValue && actorGuidToPlayerId.ContainsKey(playerStateActorGuid.Value))
         {
             pawnPlayerId = actorGuidToPlayerId[playerStateActorGuid.Value];
-            Console.WriteLine($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via PlayerState GUID: {pawnPlayerId}");
+            LogVerbose($"✓ PawnUniqueID:{pawn.PawnUniqueID} Found player via PlayerState GUID: {pawnPlayerId}");
 
             // CRITICAL: Map the pawn to this player
             if (pawnActorGuid.HasValue)
@@ -3346,7 +3070,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 if (playerInfoByPlayerId.TryGetValue(pawnPlayerId, out var playerInfo))
                 {
                     pawnToPlayerState[pawnActorGuid.Value] = playerInfo;
-                    Console.WriteLine($"✅ MAPPED PAWN: {pawnActorGuid.Value} → {pawnPlayerId}");
+                    LogVerbose($"✅ MAPPED PAWN: {pawnActorGuid.Value} → {pawnPlayerId}");
                 }
 
                 DamageTracker.MapActorToPlayer(pawnActorGuid.Value, pawnPlayerId);
@@ -3354,28 +3078,28 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 // ✅ ADD THIS: Map channel to player
                 channelToPlayerId[channelIndex] = pawnPlayerId;
 
-                Console.WriteLine($"✓ LINKED PAWN: Actor {pawnActorGuid.Value} -> Player {pawnPlayerId}");
+                LogVerbose($"✓ LINKED PAWN: Actor {pawnActorGuid.Value} -> Player {pawnPlayerId}");
             }
         }
         else
         {
-            Console.WriteLine($"⚠️ Could not identify player for pawn");
+            LogVerbose($"⚠️ Could not identify player for pawn");
         }
 
         // ✅ Track activity AFTER we've populated channelToPlayerId
         if (!string.IsNullOrEmpty(pawnPlayerId))
         {
             channelToPlayerId[channelIndex] = pawnPlayerId;
-            Console.WriteLine($"✅ MAPPED PAWN CHANNEL: {channelIndex} → Player {pawnPlayerId}");
+            LogVerbose($"✅ MAPPED PAWN CHANNEL: {channelIndex} → Player {pawnPlayerId}");
 
 
             var currentTime = (float) Builder.GetCurrentTimeDouble();
             lastChannelActivityTime[channelIndex] = currentTime;
             mostRecentActiveChannel = channelIndex;
-            Console.WriteLine($"🎯 Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
+            LogVerbose($"🎯 Set mostRecentActiveChannel = {channelIndex} for player {pawnPlayerId}");
         }
 
-        Console.WriteLine($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
+        LogVerbose($"Final Player: {pawnPlayerId ?? "UNKNOWN"}");
 
         // Check for PawnUniqueID and map it
         var pawnType = pawn.GetType();
@@ -3386,7 +3110,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             try
             {
                 var pawnUniqueId = pawnIdProp.GetValue(pawn);
-                Console.WriteLine($"PawnUniqueID: {pawnUniqueId} (Type: {pawnIdProp.PropertyType.Name})");
+                LogVerbose($"PawnUniqueID: {pawnUniqueId} (Type: {pawnIdProp.PropertyType.Name})");
 
                 if (pawnUniqueId != null)
                 {
@@ -3423,29 +3147,29 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                             if (!string.IsNullOrEmpty(pawnPlayerId))
                             {
                                 playerId = pawnPlayerId;
-                                Console.WriteLine($"✓ Got Player from pawnPlayerId: {playerId}");
+                                LogVerbose($"✓ Got Player from pawnPlayerId: {playerId}");
                             }
 
                             // Second, try channel mapping
                             if (string.IsNullOrEmpty(playerId) && channelToPlayerId.TryGetValue(channelIndex, out var channelPlayerId))
                             {
                                 playerId = channelPlayerId;
-                                Console.WriteLine($"✓ Got Player from channel {channelIndex}: {playerId}");
+                                LogVerbose($"✓ Got Player from channel {channelIndex}: {playerId}");
                             }
 
                             if (!string.IsNullOrEmpty(playerId))
                             {
                                 pawnUniqueIdToPlayerId[persistentId] = playerId;
-                                Console.WriteLine($"✓ Mapped PawnUniqueID {persistentId} → {playerId}");
+                                LogVerbose($"✓ Mapped PawnUniqueID {persistentId} → {playerId}");
                             }
                             else
                             {
-                                Console.WriteLine($"⚠ PawnUniqueID {persistentId} = UNRESOLVED (no player found)");
+                                LogVerbose($"⚠ PawnUniqueID {persistentId} = UNRESOLVED (no player found)");
                             }
                         }
                         else
                         {
-                            Console.WriteLine($"⚠ PawnUniqueID {persistentId} already mapped");
+                            LogVerbose($"⚠ PawnUniqueID {persistentId} already mapped");
                         }
                     }
                 }
@@ -3453,12 +3177,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"✗ Error reading PawnUniqueID: {ex.Message}");
+                LogVerbose($"✗ Error reading PawnUniqueID: {ex.Message}");
             }
         }
         else
         {
-            Console.WriteLine($"⚠ PawnUniqueID property not found");
+            LogVerbose($"⚠ PawnUniqueID property not found");
         }
 
         // Track player position for build ownership
@@ -3649,7 +3373,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         // ✅ FILTER 1: Only process if there's actual damage
         if (!damageCues.Magnitude.HasValue || damageCues.Magnitude.Value <= 0)
         {
-            return; // Skip 0 damage or null damage
+            LogVerbose($"[DAMAGE_FILTER_1] No magnitude");
+            return;
         }
 
         var attackerChannel = Channels[channelIndex];
@@ -3669,12 +3394,14 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         // ✅ FILTER 2: Must have both attacker and victim
         if (string.IsNullOrEmpty(attackerPlayerId) || string.IsNullOrEmpty(victimPlayerId))
         {
+            LogVerbose($"[DAMAGE_FILTER_2] Missing attacker={attackerPlayerId} or victim={victimPlayerId}");
             return;
         }
 
         // ✅ FILTER 3: Can't damage yourself
         if (attackerPlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase))
         {
+            LogVerbose($"[DAMAGE_FILTER_3] Self damage");
             return;
         }
 
@@ -3685,39 +3412,41 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var victimPlayer = allPlayers.FirstOrDefault(p =>
             p.PlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase));
 
-        // Both must exist and both must not be bots
         if (attackerPlayer == null || victimPlayer == null)
         {
+            LogVerbose($"[DAMAGE_FILTER_4] Player not found: attacker={attackerPlayer}, victim={victimPlayer}");
             return;
         }
 
         if (attackerPlayer.IsBot || victimPlayer.IsBot)
         {
+            LogVerbose($"[DAMAGE_FILTER_4B] Bot detected");
             return;
         }
 
-        // ✅ FILTER 5: Check for valid player names (not equal to their ID)
-        if (string.IsNullOrEmpty(attackerPlayer.PlayerName) ||
-            string.IsNullOrEmpty(victimPlayer.PlayerName))
+        // ✅ FILTER 5: Check for valid player names
+        if (string.IsNullOrEmpty(attackerPlayer.PlayerName) || string.IsNullOrEmpty(victimPlayer.PlayerName))
         {
+            LogVerbose($"[DAMAGE_FILTER_5] No player name");
             return;
         }
 
         if (attackerPlayer.PlayerName.Equals(attackerPlayer.PlayerId, StringComparison.OrdinalIgnoreCase) ||
             victimPlayer.PlayerName.Equals(victimPlayer.PlayerId, StringComparison.OrdinalIgnoreCase))
         {
-            return; // Likely a fake/system player
+            LogVerbose($"[DAMAGE_FILTER_5B] Fake player name");
+            return;
         }
 
-        // ✅ FILTER 6: Team check - don't count team damage
+        // ✅ FILTER 6: Team check
         if (attackerPlayer.TeamIndex == victimPlayer.TeamIndex && attackerPlayer.TeamIndex > 0)
         {
-            return; // Same team
+            LogVerbose($"[DAMAGE_FILTER_6] Same team");
+            return;
         }
 
         // ✅ FILTER 7: Don't count damage to knocked players
         var playerTimelines = Builder.GetPlayerStateHistory();
-
         bool victimIsKnockedDown = false;
         if (playerTimelines.ContainsKey(victimPlayerId))
         {
@@ -3735,18 +3464,17 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
         }
 
-        // Skip damage to knocked players
         if (victimIsKnockedDown)
         {
-            Console.WriteLine($"⚠️  DAMAGE IGNORED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} (victim is knocked down)");
+            LogVerbose($"[DAMAGE_FILTER_7] Victim knocked down");
             return;
         }
 
-        // ✅ ALL FILTERS PASSED - Record the damage
+        // ✅ ALL FILTERS PASSED
         uint damageAmount = (uint) damageCues.Magnitude.Value;
         DamageTracker.RecordDamage(attackerPlayerId, victimPlayerId, damageAmount, false);
 
-        Console.WriteLine($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
+        LogVerbose($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
     }
 
     private void AnalyzeForStats(object obj, string typeName, uint channelIndex, string? playerId = null)
@@ -3950,8 +3678,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             var elim = new PlayerElimination { Info = info };
             var version = archive.ReadInt32();
 
-            //Console.WriteLine($"\n=== PARSING ELIMINATION ===");
-            //Console.WriteLine($"Version: {version}");
+            //LogVerbose($"\n=== PARSING ELIMINATION ===");
+            //LogVerbose($"Version: {version}");
 
             if (version >= 3)
             {
@@ -3985,17 +3713,17 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 archive.SkipBytes(80);
             }
 
-            //Console.WriteLine($"Parsing eliminated player...");
+            //LogVerbose($"Parsing eliminated player...");
             var eliminatedPosStart = archive.Position;
             ParsePlayer(archive, elim.EliminatedInfo, version);
             var eliminatedBytesRead = archive.Position - eliminatedPosStart;
-            //Console.WriteLine($"  Eliminated: '{elim.EliminatedInfo.Id}' (Type: {elim.EliminatedInfo.PlayerType}) - Read {eliminatedBytesRead} bytes");
+            //LogVerbose($"  Eliminated: '{elim.EliminatedInfo.Id}' (Type: {elim.EliminatedInfo.PlayerType}) - Read {eliminatedBytesRead} bytes");
 
-            //Console.WriteLine($"Parsing eliminator...");
+            //LogVerbose($"Parsing eliminator...");
             var eliminatorPosStart = archive.Position;
             ParsePlayer(archive, elim.EliminatorInfo, version);
             var eliminatorBytesRead = archive.Position - eliminatorPosStart;
-            //Console.WriteLine($"  Eliminator: '{elim.EliminatorInfo.Id}' (Type: {elim.EliminatorInfo.PlayerType}) - Read {eliminatorBytesRead} bytes");
+            //LogVerbose($"  Eliminator: '{elim.EliminatorInfo.Id}' (Type: {elim.EliminatorInfo.PlayerType}) - Read {eliminatorBytesRead} bytes");
 
             elim.GunType = archive.ReadByte();
             elim.Knocked = archive.ReadUInt32AsBoolean();
@@ -4054,7 +3782,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ Error parsing elimination event: {ex.Message}");
+                LogVerbose($"❌ Error parsing elimination event: {ex.Message}");
             }
         }
     }
@@ -4125,12 +3853,12 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         if (obj == null)
         {
-            Console.WriteLine($"{indentStr}{label}: null");
+            LogVerbose($"{indentStr}{label}: null");
             return;
         }
 
         Type type = obj.GetType();
-        Console.WriteLine($"{indentStr}{label}: {type.Name}");
+        LogVerbose($"{indentStr}{label}: {type.Name}");
 
         // Log all public properties
         foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
@@ -4140,11 +3868,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
             if (value == null)
             {
-                Console.WriteLine($"{indentStr}    {prop.Name}: null");
+                LogVerbose($"{indentStr}    {prop.Name}: null");
             }
             else if (prop.PropertyType.IsPrimitive || prop.PropertyType == typeof(string))
             {
-                Console.WriteLine($"{indentStr}    {prop.Name}: {value}");
+                LogVerbose($"{indentStr}    {prop.Name}: {value}");
             }
             else
             {
@@ -4161,11 +3889,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
             if (value == null)
             {
-                Console.WriteLine($"{indentStr}    {field.Name}: null");
+                LogVerbose($"{indentStr}    {field.Name}: null");
             }
             else if (field.FieldType.IsPrimitive || field.FieldType == typeof(string))
             {
-                Console.WriteLine($"{indentStr}    {field.Name}: {value}");
+                LogVerbose($"{indentStr}    {field.Name}: {value}");
             }
             else
             {
@@ -4496,23 +4224,25 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     public async Task ExportPlayerStatsToCSVAsync(string filePath)
     {
-        MapPlayerStatesForBuildTracking();
-
         var csvLines = new List<string>();
         var replayId = Path.GetFileNameWithoutExtension(filePath).Replace("player_stats_", "");
 
+        double matchStart = Builder.GetMatchStartTime();
+        double matchEnd = Builder.GetCurrentTimeDouble();
+        DamageTracker.SetMatchTimes(matchStart, matchEnd);
+
         var headers = new List<string>
-{
-    "ReplayID", "EpicID", "PlayerName",
-    "Eliminations", "WasRebooted",
-    "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
-    "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
-    "DamageDealt", "DamageTaken", "ShotsHit",
-    "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions",
-    "BuildCountByOwnerPersistentID"
-};
+    {
+        "ReplayID", "EpicID", "PlayerName", "TeamIndex",
+        "Eliminations", "WasRebooted", "AliveSeconds", "ZonesSurvived",
+        "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
+        "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
+        "DamageDealt","DamagePerMinute", "DamageTaken", "ShotsHit",
+        "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions"
+    };
 
         csvLines.Add(string.Join(",", headers));
+        Console.WriteLine($"[CSV_DEBUG] Headers added: {headers.Count}");
 
         var allPlayerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         allPlayerIds.UnionWith(playerRealtimeStats.Keys);
@@ -4521,70 +4251,79 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         allPlayerIds.UnionWith(BuildTracker.GetAllPlayerStats().Keys);
         allPlayerIds.UnionWith(Builder.GetAllEliminationCounts().Keys);
 
-        LogVerbose($"Processing {allPlayerIds.Count} unique players...");
+        Console.WriteLine($"[CSV_DEBUG] Found {allPlayerIds.Count} unique players");
+        foreach (var pid in allPlayerIds.Take(5))
+        {
+            Console.WriteLine($"[CSV_DEBUG] Player: {pid}");
+        }
 
         foreach (var playerId in allPlayerIds)
         {
-            var row = new List<string> { replayId, playerId.ToLower() };
-
-            var playerName = GetPlayerNameFromReplay(playerId);
-            if (!string.IsNullOrEmpty(playerName) && !playerName.Equals(playerId, StringComparison.OrdinalIgnoreCase))
+            try
             {
-                row.Add($"\"{playerName}\"");
+                var row = new List<string> { replayId, playerId.ToLower() };
+
+                var playerName = GetPlayerNameFromReplay(playerId);
+                if (!string.IsNullOrEmpty(playerName) && !playerName.Equals(playerId, StringComparison.OrdinalIgnoreCase))
+                {
+                    row.Add($"\"{playerName}\"");
+                }
+                else
+                {
+                    row.Add("\"\"");
+                }
+
+                var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
+                row.Add((playerData?.TeamIndex ?? 0).ToString());
+
+                var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId) ? Builder.GetEliminationCounts()[playerId] : 0;
+                var wasRebooted = Builder.WasPlayerRebooted(playerId) ? 1 : 0;
+                row.Add(eliminations.ToString());
+                row.Add(wasRebooted.ToString());
+
+                var aliveSeconds = Builder.GetPlayerAliveTime(playerId);
+                row.Add(aliveSeconds.ToString("F2"));
+                row.Add(Builder.GetZonesSurvived(playerId).ToString());
+
+                var buildStats = BuildTracker.GetPlayerStats(playerId);
+                row.Add(buildStats.TotalBuildsPlaced.ToString());
+                row.Add(buildStats.WoodBuilds.ToString());
+                row.Add(buildStats.StoneBuilds.ToString());
+                row.Add(buildStats.MetalBuilds.ToString());
+                row.Add(buildStats.WallsPlaced.ToString());
+                row.Add(buildStats.FloorsPlaced.ToString());
+                row.Add(buildStats.StairsPlaced.ToString());
+                row.Add(buildStats.RoofsPlaced.ToString());
+                row.Add(buildStats.BuildsEdited.ToString());
+                row.Add(buildStats.BuildsDestroyed.ToString());
+
+                var damageStats = DamageTracker.PlayerStats.ContainsKey(playerId) ? DamageTracker.PlayerStats[playerId] : null;
+                row.Add(damageStats?.TotalDamageDealt.ToString() ?? "0");
+                row.Add(DamageTracker.GetDamagePerMinute(playerId).ToString("F2"));
+                row.Add(damageStats?.TotalDamageTaken.ToString() ?? "0");
+                row.Add(damageStats?.ShotsHit.ToString() ?? "0");
+
+                var harvestStats = HarvestTracker.GetPlayerStats(playerId);
+                row.Add(harvestStats.TotalMaterialsHarvested.ToString());
+                row.Add(harvestStats.WoodHarvested.ToString());
+                row.Add(harvestStats.StoneHarvested.ToString());
+                row.Add(harvestStats.MetalHarvested.ToString());
+                row.Add(harvestStats.HarvestActions.ToString());
+
+                csvLines.Add(string.Join(",", row));
+                Console.WriteLine($"[CSV_DEBUG] Added row for {playerId} ({row.Count} columns)");
             }
-            else
+            catch (Exception ex)
             {
-                row.Add("\"\"");
+                Console.WriteLine($"[CSV_ERROR] Failed to process {playerId}: {ex.Message}");
             }
-
-            var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId)
-                ? Builder.GetEliminationCounts()[playerId]
-                : 0;
-            var wasRebooted = Builder.WasPlayerRebooted(playerId) ? 1 : 0;
-            row.Add(eliminations.ToString());
-            row.Add(wasRebooted.ToString());
-
-            var buildStats = BuildTracker.GetPlayerStats(playerId);
-            row.Add(buildStats.TotalBuildsPlaced.ToString());
-            row.Add(buildStats.WoodBuilds.ToString());
-            row.Add(buildStats.StoneBuilds.ToString());
-            row.Add(buildStats.MetalBuilds.ToString());
-            row.Add(buildStats.WallsPlaced.ToString());
-            row.Add(buildStats.FloorsPlaced.ToString());
-            row.Add(buildStats.StairsPlaced.ToString());
-            row.Add(buildStats.RoofsPlaced.ToString());
-            row.Add(buildStats.BuildsEdited.ToString());
-            row.Add(buildStats.BuildsDestroyed.ToString());
-
-            var damageStats = DamageTracker.PlayerStats.ContainsKey(playerId)
-                ? DamageTracker.PlayerStats[playerId]
-                : null;
-            row.Add(damageStats?.TotalDamageDealt.ToString() ?? "0");
-            row.Add(damageStats?.TotalDamageTaken.ToString() ?? "0");
-            row.Add(damageStats?.ShotsHit.ToString() ?? "0");
-
-            var harvestStats = HarvestTracker.GetPlayerStats(playerId);
-            row.Add(harvestStats.TotalMaterialsHarvested.ToString());
-            row.Add(harvestStats.WoodHarvested.ToString());
-            row.Add(harvestStats.StoneHarvested.ToString());
-            row.Add(harvestStats.MetalHarvested.ToString());
-            row.Add(harvestStats.HarvestActions.ToString());
-
-            // ✅ Add builds by owner persistent ID for this player
-            var buildCountForPlayer = _buildCountByOwnerPersistentId
-                .Where(kvp => _ownerPersistentIdToEpicId.TryGetValue(kvp.Key, out var id) && id.Equals(playerId, StringComparison.OrdinalIgnoreCase))
-                .Sum(kvp => kvp.Value);
-            row.Add(buildCountForPlayer.ToString());
-
-            csvLines.Add(string.Join(",", row));
         }
 
+        Console.WriteLine($"[CSV_DEBUG] Writing {csvLines.Count} lines to file");
         await File.WriteAllLinesAsync(filePath, csvLines);
         LogVerbose($"\n*** CSV exported to: {filePath} ***");
         LogVerbose($"*** Exported {allPlayerIds.Count} unique players with {headers.Count} columns ***");
     }
-
-
 
 
 

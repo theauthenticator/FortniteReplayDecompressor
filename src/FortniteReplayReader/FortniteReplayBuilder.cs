@@ -64,8 +64,17 @@ public class FortniteReplayBuilder
         public bool CanBeRevived { get; set; }
     }
 
+    private Dictionary<string, int> playerZonesSurvived = new();
+    private float lastSafeZoneStartShrinkTime = -1;
+    private bool firstZoneProcessed = false;
 
     private readonly GameData GameData = new();
+
+    public double GetMatchStartTime()
+    {
+        return GameData?.MatchStartTime ?? 0;
+    }
+
     private readonly MapData MapData = new();
     private readonly List<KillFeedEntry> KillFeed = new();
 
@@ -77,10 +86,13 @@ public class FortniteReplayBuilder
 
     private Dictionary<uint, string> _buildChannelToPlayerId = new();
 
+    private Dictionary<string, double> playerSpawnTimes = new();
+    private Dictionary<string, double> playerDeathTimes = new();
+
     private readonly Dictionary<uint, uint> _actorToChannel = new();
     private readonly Dictionary<uint, uint> _channelToActor = new();
 
-    private double? _matchStartTime = null;
+    private double? matchStartTime = null;
     private Dictionary<string, List<(double timestamp, string property, object value)>> _playerStateHistory = new();
 
     private readonly Dictionary<uint, uint> _pawnChannelToStateChannel = new();
@@ -160,6 +172,135 @@ public class FortniteReplayBuilder
     public int GetEliminationCreditForPlayer(string playerId)
     {
         return _eliminationCredits.ContainsKey(playerId) ? _eliminationCredits[playerId] : 0;
+    }
+
+    public void TrackZoneSurvival(SafeZoneIndicator safeZone)
+    {
+        if (safeZone?.SafeZoneStartShrinkTime == null || safeZone.SafeZoneStartShrinkTime <= 0)
+        {
+            return;
+        }
+
+        float currentStartShrinkTime = safeZone.SafeZoneStartShrinkTime;
+
+        Console.WriteLine($"[ZONE_DEBUG] SafeZoneStartShrinkTime: {currentStartShrinkTime}, Last: {lastSafeZoneStartShrinkTime}");
+
+        // ✅ First time, set baseline AND count first zone
+        if (lastSafeZoneStartShrinkTime == -1)
+        {
+            lastSafeZoneStartShrinkTime = currentStartShrinkTime;
+
+            // Count first zone survivors
+            if (!firstZoneProcessed)
+            {
+                firstZoneProcessed = true;
+                int aliveCount = 0;
+                foreach (var player in _players.Values)
+                {
+                    if (player.DeathTime == null)
+                    {
+                        string playerId = player.PlayerId;
+                        if (!playerZonesSurvived.ContainsKey(playerId))
+                            playerZonesSurvived[playerId] = 0;
+
+                        playerZonesSurvived[playerId]++;
+                        aliveCount++;
+                    }
+                }
+                Console.WriteLine($"[ZONE_DEBUG] ⚠️ ZONE 1 - {aliveCount} players survived");
+            }
+            return;
+        }
+
+        // ✅ Zone changed
+        if (currentStartShrinkTime != lastSafeZoneStartShrinkTime)
+        {
+            Console.WriteLine($"[ZONE_DEBUG] ⚠️ NEW ZONE: {lastSafeZoneStartShrinkTime} → {currentStartShrinkTime}");
+
+            int aliveCount = 0;
+            foreach (var player in _players.Values)
+            {
+                if (player.DeathTime == null)
+                {
+                    string playerId = player.PlayerId;
+                    if (!playerZonesSurvived.ContainsKey(playerId))
+                        playerZonesSurvived[playerId] = 0;
+
+                    playerZonesSurvived[playerId]++;
+                    aliveCount++;
+                }
+            }
+
+            Console.WriteLine($"[ZONE_DEBUG] {aliveCount} players survived");
+            lastSafeZoneStartShrinkTime = currentStartShrinkTime;
+        }
+    }
+    public int GetZonesSurvived(string playerId)
+    {
+        return playerZonesSurvived.ContainsKey(playerId) ? playerZonesSurvived[playerId] : 0;
+    }
+
+    public Dictionary<string, int> GetAllZonesSurvived()
+    {
+        return playerZonesSurvived;
+    }
+
+
+    public double GetPlayerAliveTime(string playerId)
+    {
+        Console.WriteLine($"[ALIVE_TIME_START] Getting alive time for {playerId}");
+
+        if (!playerSpawnTimes.ContainsKey(playerId))
+        {
+            Console.WriteLine($"[ALIVE_TIME_DEBUG] {playerId} - No spawn time recorded");
+            return 0;
+        }
+
+        double spawnTime = playerSpawnTimes[playerId];
+        double matchStart = GameData.MatchStartTime ?? 0;
+        Console.WriteLine($"[ALIVE_TIME_DEBUG] {playerId} - Initial spawn time: {spawnTime:F2}s, Match start: {matchStart:F2}s");
+
+        // ✅ If spawned before match start, use match start as spawn time instead
+        if (spawnTime < matchStart)
+        {
+            Console.WriteLine($"[ALIVE_TIME_DEBUG] {playerId} - Spawn island spawn ({spawnTime:F2}s < {matchStart:F2}s), using match start instead");
+            spawnTime = matchStart;
+        }
+
+        // ✅ Use death time if available, otherwise use current time
+        double deathTime;
+        if (playerDeathTimes.ContainsKey(playerId))
+        {
+            deathTime = playerDeathTimes[playerId];
+            double aliveTime = deathTime - spawnTime;
+            Console.WriteLine($"[ALIVE_TIME_DEBUG] {playerId} - Dead: Spawn {spawnTime:F2}s → Death {deathTime:F2}s = {aliveTime:F2}s alive");
+            return aliveTime;
+        }
+        else
+        {
+            deathTime = GetCurrentTimeDouble();
+            double aliveTime = deathTime - spawnTime;
+            Console.WriteLine($"[ALIVE_TIME_DEBUG] {playerId} - Alive: Spawn {spawnTime:F2}s → Now {deathTime:F2}s = {aliveTime:F2}s alive");
+            return aliveTime;
+        }
+    }
+    public void TrackPlayerSpawn(string playerId, double spawnTime)
+    {
+        playerSpawnTimes[playerId] = spawnTime;
+    }
+
+    public void TrackPlayerDeath(string playerId, double deathTime)
+    {
+        playerDeathTimes[playerId] = deathTime;
+    }
+    public void OnGameStateUpdate(GameState gameState)
+    {
+        // ✅ Detect match start from GameState
+        if (gameState?.bReplicatedHasBegunPlay == true && matchStartTime == null)
+        {
+            matchStartTime = GameData.MatchStartTime;
+            Console.WriteLine($"[MATCH_START] Match started at {matchStartTime:F2}s");
+        }
     }
 
 
@@ -2199,6 +2340,8 @@ public class FortniteReplayBuilder
     {
 
         var currentTime = ReplicatedWorldTimeSecondsDouble ?? 0;
+
+        OnGameStateUpdate(state);
         PrintPlayerStateViaReflection(state, currentTime);
 
         GameData.GameSessionId ??= state?.GameSessionId;
@@ -2418,9 +2561,9 @@ public class FortniteReplayBuilder
     }
 
     private Dictionary<uint, FortPlayerState> _lastPlayerStates = new();
+    public Dictionary<short, string> persistentIdToPlayerId = new(); // WorldPlayerId -> Internal PlayerId
     public void UpdatePlayerState(uint channelIndex, FortPlayerState state)
     {
-
         var playerId = GetPlayerIdFromChannel(channelIndex);
 
         if (!string.IsNullOrEmpty(playerId) && !_channelToPlayerId.ContainsKey(channelIndex))
@@ -2436,6 +2579,39 @@ public class FortniteReplayBuilder
 
         if (state != null)
         {
+            // ✅ ALWAYS capture WorldPlayerId → UniqueID mapping throughout the replay
+            if (state.WorldPlayerId.HasValue)
+            {
+                short worldPlayerId = state.WorldPlayerId.Value;
+
+                string epicId = null;
+                if (!string.IsNullOrEmpty(playerId))
+                {
+                    epicId = playerId;
+                }
+                else if (!string.IsNullOrEmpty(state.UniqueID))
+                {
+                    epicId = state.UniqueID;
+                }
+                else if (!string.IsNullOrEmpty(state.UniqueId))
+                {
+                    epicId = state.UniqueId;
+                }
+                else if (!string.IsNullOrEmpty(state.PlatformUniqueNetId))
+                {
+                    epicId = state.PlatformUniqueNetId;
+                }
+
+                if (!string.IsNullOrEmpty(epicId))
+                {
+                    if (epicId.Contains("["))
+                        epicId = epicId.Split('[')[0].Trim();
+
+                    persistentIdToPlayerId[worldPlayerId] = epicId;
+                    Console.WriteLine($"✅ [UpdatePlayerState] WorldPlayerId {worldPlayerId} → {epicId}");
+                }
+            }
+
             // ✅ Get player name for logging
             string playerName = null;
             if (state.PlayerNamePrivate != null)
@@ -2465,7 +2641,7 @@ public class FortniteReplayBuilder
 
             if (nonNullProps.Any())
             {
-                Console.WriteLine($"\n📋 {playerName} @ {timestamp:F2}s:");
+                Console.WriteLine($"\n📋[FORTPLAYRSTATE_DBG] {playerName} @ {timestamp:F2}s:");
                 foreach (var prop in nonNullProps)
                 {
                     Console.WriteLine($"   {prop}");
@@ -2474,7 +2650,6 @@ public class FortniteReplayBuilder
         }
         if (state != null)
         {
-
             if (!string.IsNullOrEmpty(playerId))
             {
                 if (!_playerStateHistory.ContainsKey(playerId))
@@ -2557,6 +2732,25 @@ public class FortniteReplayBuilder
                 }
 
                 _players[channelIndex] = playerData;
+
+                // ✅ Track spawn time using available player info
+                string spawnPlayerId = playerId;
+                if (string.IsNullOrEmpty(spawnPlayerId) && !string.IsNullOrEmpty(state.UniqueID))
+                {
+                    spawnPlayerId = state.UniqueID;
+                    if (spawnPlayerId.Contains("["))
+                        spawnPlayerId = spawnPlayerId.Split('[')[0].Trim();
+                }
+
+                if (!string.IsNullOrEmpty(spawnPlayerId))
+                {
+                    playerSpawnTimes[spawnPlayerId] = ReplicatedWorldTimeSecondsDouble ?? 0;
+                    Console.WriteLine($"[PLAYER_SPAWN] {spawnPlayerId} spawned at {playerSpawnTimes[spawnPlayerId]:F2}s");
+                }
+                else
+                {
+                    Console.WriteLine($"[PLAYER_SPAWN_DEBUG] No playerId for channel {channelIndex}");
+                }
             }
 
             if (state.RebootCounter > 0 && state.RebootCounter > playerData.RebootCounter)
@@ -2589,6 +2783,13 @@ public class FortniteReplayBuilder
             {
                 playerData.DeathTime = ReplicatedWorldTimeSeconds;
                 playerData.DeathTimeDouble = ReplicatedWorldTimeSecondsDouble;
+
+                // ✅ Track death time
+                if (!string.IsNullOrEmpty(playerId))
+                {
+                    playerDeathTimes[playerId] = ReplicatedWorldTimeSecondsDouble ?? 0;
+                    Console.WriteLine($"[PLAYER_DEATH] {playerId} died at {playerDeathTimes[playerId]:F2}s");
+                }
             }
 
             playerData.Cosmetics.Parts ??= state.Parts?.Name;
@@ -2600,7 +2801,6 @@ public class FortniteReplayBuilder
             }
         }
     }
-
     public Dictionary<uint, PlayerData> GetPlayers()
     {
         return _players;
@@ -2618,6 +2818,15 @@ public class FortniteReplayBuilder
             return;
 
         history.Add((timestamp, property, value));
+    }
+
+    public void MapWorldPlayerIdToEpicId(short worldPlayerId, string epicId)
+    {
+        if (epicId.Contains("["))
+            epicId = epicId.Split('[')[0].Trim();
+
+        persistentIdToPlayerId[worldPlayerId] = epicId;
+        Console.WriteLine($"✅ [Builder] WorldPlayerId {worldPlayerId} → {epicId}");
     }
 
     public void UpdateKillFeed(uint channelIndex, PlayerData data, FortPlayerState state)
@@ -2915,6 +3124,27 @@ public class FortniteReplayBuilder
 
     public void UpdateSafeZones(SafeZoneIndicator safeZone)
     {
+        TrackZoneSurvival(safeZone);
+
+        // ✅ Debug via reflection
+        Console.WriteLine($"\n[SAFEZONE_DEBUG] SafeZoneIndicator properties:");
+        var props = safeZone.GetType().GetProperties();
+        foreach (var prop in props)
+        {
+            try
+            {
+                var value = prop.GetValue(safeZone);
+                if (value != null)
+                {
+                    Console.WriteLine($"  {prop.Name}: {value}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  {prop.Name}: [Error: {ex.Message}]");
+            }
+        }
+
         if (safeZone.SafeZoneStartShrinkTime <= 0 && safeZone.SafeZoneFinishShrinkTime <= 0)
         {
             return;

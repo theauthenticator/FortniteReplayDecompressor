@@ -41,6 +41,27 @@ public class BatchedDamageCues : INetFieldExportGroup
     [NetFieldExport("bIsBallistic", RepLayoutCmdType.PropertyBool)]
     public bool? bIsBallistic { get; set; }
 
+    [NetFieldExport("LocalSpaceImpactPoint", RepLayoutCmdType.PropertyVector10)]
+    public FVector LocalSpaceImpactPoint { get; set; }
+
+    [NetFieldExport("LocalSpaceImpactNormal", RepLayoutCmdType.PropertyVectorNormal)]
+    public FVector LocalSpaceImpactNormal { get; set; }
+
+    [NetFieldExport("bIsBeam", RepLayoutCmdType.PropertyBool)]
+    public bool? bIsBeam { get; set; }
+
+    [NetFieldExport("bFiredWhileTargeting", RepLayoutCmdType.PropertyBool)]
+    public bool? bFiredWhileTargeting { get; set; }
+
+    [NetFieldExport("bOffhandWasFired", RepLayoutCmdType.PropertyBool)]
+    public bool? bOffhandWasFired { get; set; }
+
+    [NetFieldExport("HitComponent", RepLayoutCmdType.PropertyObject)]
+    public uint? HitComponent { get; set; }
+
+    [NetFieldExport("SourceWeapon", RepLayoutCmdType.PropertyObject)]
+    public uint? SourceWeapon { get; set; }
+
     [NetFieldExport("NonPlayerHitActor", RepLayoutCmdType.PropertyObject)]
     public uint? NonPlayerHitActor { get; set; }
 

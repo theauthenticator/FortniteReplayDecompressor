@@ -11,10 +11,20 @@ using Microsoft.Extensions.Logging.Abstractions;
 var replayDirectory = @"../../../downloaded_replays";
 var outputDirectory = @"../../../processed_csvs";
 var epicAccessToken = "dbb29d4e04844d868240b66f5408090a";
+
 var replayIds = new[]
+{
+    "99213d64337b43ee918c5bfaa0f8a1e0",
+    "dd2b5a2d74b5414ba4f228cc9463c03f",
+    "899a1b1da214499b9584f16f7896fb4f",
+    "a877d042840648a3bda24cb9b831459b",
+};
+
+var replayIds_Singular = new[]
 {
     "a877d042840648a3bda24cb9b831459b",
 };
+
 var maxParallel = 4;
 
 Directory.CreateDirectory(outputDirectory);
@@ -39,7 +49,7 @@ else
 Console.WriteLine($"Preparing to process {replayIds.Length} replay(s)...\n");
 
 // === PROCESS EACH REPLAY ===
-await Parallel.ForEachAsync(replayIds, new ParallelOptions { MaxDegreeOfParallelism = maxParallel }, async (replayId, token) =>
+await Parallel.ForEachAsync(replayIds_Singular, new ParallelOptions { MaxDegreeOfParallelism = maxParallel }, async (replayId, token) =>
 {
     var replayPath = Path.Combine(replayDirectory, $"{replayId}.replay");
     var csvFilePath = Path.Combine(outputDirectory, $"player_stats_{replayId}.csv");
