@@ -89,8 +89,8 @@ public class FortniteReplayBuilder
     private Dictionary<string, double> playerSpawnTimes = new();
     private Dictionary<string, double> playerDeathTimes = new();
 
-    private readonly Dictionary<uint, uint> _actorToChannel = new();
-    private readonly Dictionary<uint, uint> _channelToActor = new();
+    public readonly Dictionary<uint, uint> _actorToChannel = new();
+    public readonly Dictionary<uint, uint> _channelToActor = new();
 
     private double? matchStartTime = null;
     private Dictionary<string, List<(double timestamp, string property, object value)>> _playerStateHistory = new();
@@ -243,6 +243,49 @@ public class FortniteReplayBuilder
     public Dictionary<string, int> GetAllZonesSurvived()
     {
         return playerZonesSurvived;
+    }
+
+    private readonly Dictionary<uint, (uint channelIndex, Actor actor)> _actorGuidRegistry = new();
+
+    public void RegisterActorGuid(uint guidValue, uint channelIndex, Actor actor)
+    {
+        _actorGuidRegistry[guidValue] = (channelIndex, actor);
+        Console.WriteLine($"[GUID_REGISTRY] Registered GUID {guidValue} → Channel {channelIndex}");
+    }
+
+    public bool TryGetActorFromGuid(uint guidValue, out Actor actor)
+    {
+        if (_actorGuidRegistry.TryGetValue(guidValue, out var result))
+        {
+            actor = result.actor;
+            return true;
+        }
+        actor = null;
+        return false;
+    }
+
+    private readonly HashSet<uint> _harvestedArchetypes = new();
+
+    public void RegisterHarvestedArchetype(uint archetypeGuid)
+    {
+        _harvestedArchetypes.Add(archetypeGuid);
+    }
+
+    public bool IsHarvestedArchetype(uint archetypeGuid)
+    {
+        return _harvestedArchetypes.Contains(archetypeGuid);
+    }
+
+    private readonly Dictionary<uint, string> _archetypeGuidToMaterial = new();
+
+    public void RegisterArchetypeMaterial(uint archetypeGuid, string material)
+    {
+        _archetypeGuidToMaterial[archetypeGuid] = material;
+    }
+
+    public bool TryGetMaterialFromArchetype(uint archetypeGuid, out string material)
+    {
+        return _archetypeGuidToMaterial.TryGetValue(archetypeGuid, out material);
     }
 
 
@@ -1005,38 +1048,41 @@ public class FortniteReplayBuilder
 
 
 
+
+
     /// <summary>
     /// Get player ID from any channel type (actor ID, state channel, pawn channel, or broadcast)
     /// </summary>
     public string GetPlayerIdFromAnyChannel(uint channelIndex)
     {
-
         // Method 0: Build channel lookup (NEW)
         if (_buildChannelToPlayerId.TryGetValue(channelIndex, out var buildPlayerId))
         {
+            Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 0 (buildChannel) → {buildPlayerId}");
             return buildPlayerId;
         }
 
         // Method 1: Direct lookup in players (state channels)
         if (_players.TryGetValue(channelIndex, out var playerData))
         {
+            Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 1 (players) → {playerData.PlayerId}");
             return playerData.PlayerId ?? string.Empty;
         }
 
-        // Method 2: Actor ID → Channel lookup (IMPORTANT for KillFeed FinisherOrDownerActorId)
+        // Method 2: Actor ID → Channel lookup
         if (_actorToChannel.TryGetValue(channelIndex, out var pawnChannel))
         {
-            // Now map pawn channel to state channel
             if (_pawnChannelToStateChannel.TryGetValue(pawnChannel, out var stateChannel))
             {
                 if (_players.TryGetValue(stateChannel, out playerData))
                 {
+                    Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 2a (actorToChannel→pawnToState) → {playerData.PlayerId}");
                     return playerData.PlayerId ?? string.Empty;
                 }
             }
-            // If no state channel mapping, try pawn channel directly
             if (_players.TryGetValue(pawnChannel, out playerData))
             {
+                Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 2b (actorToChannel direct) → {playerData.PlayerId}");
                 return playerData.PlayerId ?? string.Empty;
             }
         }
@@ -1046,6 +1092,7 @@ public class FortniteReplayBuilder
         {
             if (_players.TryGetValue(stateChannel2, out playerData))
             {
+                Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 3 (pawnToState) → {playerData.PlayerId}");
                 return playerData.PlayerId ?? string.Empty;
             }
         }
@@ -1053,11 +1100,14 @@ public class FortniteReplayBuilder
         // Method 4: Broadcast→Player mapping
         if (_broadcastChannelToPlayerId.TryGetValue(channelIndex, out var playerId))
         {
+            Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → Method 4 (broadcast) → {playerId}");
             return playerId;
         }
 
+        Console.WriteLine($"[PLAYER_LOOKUP] Channel {channelIndex} → NO MATCH (all methods failed)");
         return string.Empty;
     }
+
 
     /// <summary>
     /// Registers an export group for an actor.
@@ -2341,6 +2391,12 @@ public class FortniteReplayBuilder
 
         var currentTime = ReplicatedWorldTimeSecondsDouble ?? 0;
 
+        Console.WriteLine($"[C#_GAMESTATE] UpdateGameState called at time={currentTime:F2}s");
+        Console.WriteLine($"[C#_GAMESTATE]   GameSessionId: {state?.GameSessionId}");
+        Console.WriteLine($"[C#_GAMESTATE]   bReplicatedHasBegunPlay: {state?.bReplicatedHasBegunPlay}");
+        Console.WriteLine($"[C#_GAMESTATE]   ReplicatedWorldTimeSeconds: {state?.ReplicatedWorldTimeSeconds}");
+        Console.WriteLine($"[C#_GAMESTATE]   ReplicatedWorldTimeSecondsDouble: {state?.ReplicatedWorldTimeSecondsDouble}");
+
         OnGameStateUpdate(state);
         PrintPlayerStateViaReflection(state, currentTime);
 
@@ -2752,10 +2808,16 @@ public class FortniteReplayBuilder
                     Console.WriteLine($"[PLAYER_SPAWN_DEBUG] No playerId for channel {channelIndex}");
                 }
             }
-
             if (state.RebootCounter > 0 && state.RebootCounter > playerData.RebootCounter)
             {
                 playerData.RebootCounter = state.RebootCounter;
+
+                // ✅ Add this - track rebooted players
+                if (!string.IsNullOrEmpty(playerId))
+                {
+                    _rebootedPlayers.Add(playerId);
+                    Console.WriteLine($"[REBOOT_TRACKED] {playerId} was rebooted (counter: {state.RebootCounter})");
+                }
             }
 
             if (state.RebootCounter > 0 || state.bDBNO != null || state.DeathCause != null || state.DeathLocation != null)

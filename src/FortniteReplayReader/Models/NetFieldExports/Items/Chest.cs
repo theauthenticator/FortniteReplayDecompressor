@@ -1,6 +1,7 @@
 ﻿using Unreal.Core.Attributes;
 using Unreal.Core.Models;
 using Unreal.Core.Models.Enums;
+using Unreal.Core.Contracts;
 
 namespace FortniteReplayReader.Models.NetFieldExports.Items;
 
@@ -41,4 +42,83 @@ public class FactionChest : BaseContainer
 
     [NetFieldExport("T_Faction", RepLayoutCmdType.Enum)]
     public int? Faction { get; set; }
+}
+
+
+[NetFieldExportGroup("/WildEstate/Environment/Terrain/Rocks/Blueprints/Common/WildEstate_Rock_Common_Large_A_Disp.WildEstate_Rock_Common_Large_A_Disp_C", minimalParseMode: ParseMode.Full)]
+public class WildEstateRockCommonLargeA : INetFieldExportGroup
+{
+
+    [NetFieldExport("RemoteRole", RepLayoutCmdType.Ignore)]
+    public object RemoteRole { get; set; }
+
+    [NetFieldExport("Role", RepLayoutCmdType.Ignore)]
+    public object Role { get; set; }
+
+    [NetFieldExport("bDestroyed", RepLayoutCmdType.PropertyBool)]
+    public bool? bDestroyed { get; set; }
+
+    [NetFieldExport("bInstantDeath", RepLayoutCmdType.PropertyBool)]
+    public bool? bInstantDeath { get; set; }
+
+    [NetFieldExport("ReplicatedDrawScale3D", RepLayoutCmdType.PropertyVector100)]
+    public FVector? ReplicatedDrawScale3D { get; set; }
+
+    [NetFieldExport("Health", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? Health { get; set; }
+
+    [NetFieldExport("MaxHealth", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? MaxHealth { get; set; }
+}
+
+[NetFieldExportGroup("/WildEstate/Environment/Terrain/Rocks/Blueprints/Common/WildEstate_Rock_Common_Medium_A_Disp.WildEstate_Rock_Common_Medium_A_Disp_C", minimalParseMode: ParseMode.Full)]
+public class WildEstateRockCommonMediumA : INetFieldExportGroup
+{
+
+    [NetFieldExport("RemoteRole", RepLayoutCmdType.Ignore)]
+    public object RemoteRole { get; set; }
+
+    [NetFieldExport("Role", RepLayoutCmdType.Ignore)]
+    public object Role { get; set; }
+
+    [NetFieldExport("bDestroyed", RepLayoutCmdType.PropertyBool)]
+    public bool? bDestroyed { get; set; }
+
+    [NetFieldExport("bInstantDeath", RepLayoutCmdType.PropertyBool)]
+    public bool? bInstantDeath { get; set; }
+
+    [NetFieldExport("ReplicatedDrawScale3D", RepLayoutCmdType.PropertyVector100)]
+    public FVector? ReplicatedDrawScale3D { get; set; }
+
+    [NetFieldExport("Health", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? Health { get; set; }
+
+    [NetFieldExport("MaxHealth", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? MaxHealth { get; set; }
+}
+
+[NetFieldExportGroup("/WildEstate/Environment/Terrain/Rocks/Blueprints/Common/WildEstate_Rock_Common_Small_A_Disp.WildEstate_Rock_Common_Small_A_Disp_C", minimalParseMode: ParseMode.Full)]
+public class WildEstateRockCommonSmallA : INetFieldExportGroup
+{
+
+    [NetFieldExport("RemoteRole", RepLayoutCmdType.Ignore)]
+    public object RemoteRole { get; set; }
+
+    [NetFieldExport("Role", RepLayoutCmdType.Ignore)]
+    public object Role { get; set; }
+
+    [NetFieldExport("bDestroyed", RepLayoutCmdType.PropertyBool)]
+    public bool? bDestroyed { get; set; }
+
+    [NetFieldExport("bInstantDeath", RepLayoutCmdType.PropertyBool)]
+    public bool? bInstantDeath { get; set; }
+
+    [NetFieldExport("ReplicatedDrawScale3D", RepLayoutCmdType.PropertyVector100)]
+    public FVector? ReplicatedDrawScale3D { get; set; }
+
+    [NetFieldExport("Health", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? Health { get; set; }
+
+    [NetFieldExport("MaxHealth", RepLayoutCmdType.PropertyUInt16)]  // Changed from PropertyInt
+    public ushort? MaxHealth { get; set; }
 }

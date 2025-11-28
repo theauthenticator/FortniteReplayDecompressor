@@ -67,21 +67,3 @@ public class RemoveMapMarker : INetFieldExportGroup
     public int InstanceID { get; set; }
 }
 
-[NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", minimalParseMode: ParseMode.Full)]
-public class PlayerDamagedResourceBuilding : INetFieldExportGroup
-{
-    [NetFieldExport("BuildingSMActor", RepLayoutCmdType.PropertyInt)]
-    public int BuildingSMActor { get; set; }
-
-    [NetFieldExport("PotentialResourceType", RepLayoutCmdType.Enum)]
-    public int PotentialResourceType { get; set; }
-
-    [NetFieldExport("PotentialResourceCount", RepLayoutCmdType.PropertyInt)]
-    public int PotentialResourceCount { get; set; }
-
-    [NetFieldExport("bDestroyed", RepLayoutCmdType.PropertyBool)]
-    public bool bDestroyed { get; set; }
-
-    [NetFieldExport("bJustHitWeakspot", RepLayoutCmdType.PropertyBool)]
-    public bool bJustHitWeakspot { get; set; }
-}

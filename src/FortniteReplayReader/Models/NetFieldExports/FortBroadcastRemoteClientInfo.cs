@@ -6,7 +6,7 @@ using Unreal.Core.Models.Enums;
 
 namespace FortniteReplayReader.Models.NetFieldExports;
 
-[NetFieldExportClassNetCache("FortBroadcastRemoteClientInfo_ClassNetCache", minimalParseMode: ParseMode.Full)]
+
 [NetFieldExportGroup("/Script/FortniteGame.FortBroadcastRemoteClientInfo", minimalParseMode: ParseMode.Full)]
 public class FortBroadcastRemoteClientInfo : INetFieldExportGroup
 {
@@ -71,9 +71,7 @@ public class FortBroadcastRemoteClientInfo : INetFieldExportGroup
     public RemoveMapMarker RemoveMapMarker { get; set; }
 
     [NetFieldExportRPC("ClientRemotePlayerDamagedResourceBuilding", "/Script/FortniteGame.FortBroadcastRemoteClientInfo:ClientRemotePlayerDamagedResourceBuilding", isFunction: true, enablePropertyChecksum: true)]
-    public PlayerDamagedResourceBuilding PlayerDamagedResourceBuilding { get; set; }
 
-    [NetFieldExportRPC("", "", isFunction: true, enablePropertyChecksum: true)]
     public object AnyRpc { get; set; }
 
 

@@ -423,6 +423,56 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             LogVerbose($"  - {GetPlayerNameFromReplay(player.Key)}");
         }
     }
+
+
+    public void ResolveBroadcastChannels()
+    {
+        Console.WriteLine("\n" + new string('=', 80));
+        Console.WriteLine("🔗 RESOLVING BROADCAST CHANNELS");
+        Console.WriteLine(new string('=', 80));
+
+        int resolved = 0;
+
+        foreach (var broadcastCh in broadcastChannels)
+        {
+            string playerId = "";
+
+            // Try Method 1: Direct Builder lookup
+            playerId = Builder.GetPlayerIdFromAnyChannel(broadcastCh);
+
+            // Try Method 2: Owner GUID → Player
+            if (string.IsNullOrEmpty(playerId) && broadcastChannelToOwnerGuid.TryGetValue(broadcastCh, out var ownerGuid))
+            {
+                Console.WriteLine($"   DEBUG: Channel {broadcastCh} has Owner GUID {ownerGuid}");
+                if (actorGuidToPlayerId.TryGetValue(ownerGuid, out var ownerPlayerId))
+                {
+                    playerId = ownerPlayerId;
+                    Console.WriteLine($"   DEBUG: Owner GUID {ownerGuid} → Player {ownerPlayerId}");
+                }
+                else
+                {
+                    Console.WriteLine($"   DEBUG: Owner GUID {ownerGuid} NOT in actorGuidToPlayerId");
+                }
+            }
+            else if (string.IsNullOrEmpty(playerId))
+            {
+                Console.WriteLine($"   DEBUG: Channel {broadcastCh} has NO Owner GUID stored");
+            }
+
+            if (!string.IsNullOrEmpty(playerId))
+            {
+                Builder.LinkBroadcastChannelToPlayer(broadcastCh, playerId);
+                channelToPlayerId[broadcastCh] = playerId;
+                resolved++;
+                Console.WriteLine($"✅ Channel {broadcastCh} → {playerId}");
+            }
+        }
+
+        Console.WriteLine($"\n📊 Resolved: {resolved}/{broadcastChannels.Count}");
+        Console.WriteLine(new string('=', 80) + "\n");
+    }
+
+
     public FortniteReplay ReadReplay(Stream stream)
     {
         using var archive = new Unreal.Core.BinaryReader(stream);
@@ -449,6 +499,7 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         replay.DamageSummary = DamageTracker.GetDamageSummary();
 
         LogVerbose("[POSTPROCESSING_HARVESTS]");
+        ResolveBroadcastChannels();
         PostProcessHarvestHits();
 
         LogVerbose("[UPDATING_KILLFEED]");
@@ -933,12 +984,49 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
     }
     private Dictionary<uint, List<(double timestamp, string playerId)>> channelOwnershipHistory = new();
 
+    private Dictionary<uint, uint> broadcastChannelToOwnerGuid = new();
+
     private HashSet<uint> openedChannels = new();
     private Dictionary<uint, uint> allChannelsToActorGuid = new();
-
     protected override void OnChannelOpened(uint channelIndex, NetworkGUID? actorGuid)
     {
         openedChannels.Add(channelIndex);
+
+        var playerId = Builder.GetPlayerIdFromAnyChannel(channelIndex);
+
+        // ✅ DEBUG: Log every channel that opens
+        if (_netGuidCache.TryGetPathName(actorGuid.Value, out var path))
+        {
+            Console.WriteLine($"📍 [CHANNEL_OPENED] Channel {channelIndex}: Actor={actorGuid.Value} ({path}) → Player {playerId}");
+        }
+        else
+        {
+            Console.WriteLine($"📍 [CHANNEL_OPENED] Channel {channelIndex}: Actor={actorGuid.Value} (unknown) → Player {playerId}");
+        }
+
+        if (actorGuid.Value == 13374)
+        {
+            Console.WriteLine($"🔴 [FOUND_13374] Channel {channelIndex}: Actor=13374 is opening!");
+        }
+
+
+
+        if (actorGuid.Value != 0 && Channels[channelIndex]?.Actor != null)
+        {
+            var actor = Channels[channelIndex].Actor;
+            var actorGuidValue = actorGuid.Value;
+
+            if (actor.Archetype != null)
+            {
+                var archetypeGuidValue = actor.Archetype.Value;
+
+                if (_netGuidCache.TryGetPathName(archetypeGuidValue, out var path__))
+                {
+                    // Log ALL archetypes so we can find the broadcast ones
+                    Console.WriteLine($"[ON CHANNEL OPENED] Channel={channelIndex}, ActorGUID={actorGuidValue}, Archetype={path__}");
+                }
+            }
+        }
 
         base.OnChannelOpened(channelIndex, actorGuid);
 
@@ -951,53 +1039,71 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             // ✅ Track ALL channels to their actor GUIDs
             allChannelsToActorGuid[channelIndex] = actorGuidValue;
 
+            // ✅ NEW: Register this actor in the builder for harvest lookup
+            Builder.RegisterActorGuid(actorGuidValue, channelIndex, actor);
+
             if (actor.Archetype != null)
             {
                 var archetypeGuidValue = actor.Archetype.Value;
                 actorGuidToArchetypeGuid[actorGuidValue] = archetypeGuidValue;
 
                 string archetypePath;
-                if (_netGuidCache.TryGetPathName(archetypeGuidValue, out var path))
+                if (_netGuidCache.TryGetPathName(archetypeGuidValue, out var path__))
                 {
-                    archetypeGuidToPath[archetypeGuidValue] = path;
-                    archetypePath = path;
+                    archetypeGuidToPath[archetypeGuidValue] = path__;
+                    archetypePath = path__;
+
+                    // ✅ Extract and register material from archetype path
+                    string material = "Stone"; // default
+                    if (path__.Contains("Wood") || path__.Contains("Tree"))
+                        material = "Wood";
+                    else if (path__.Contains("Metal") || path__.Contains("Car") || path__.Contains("Machinery"))
+                        material = "Metal";
+
+                    Builder.RegisterArchetypeMaterial(archetypeGuidValue, material);
+                    Console.WriteLine($"🌲 Registered archetype {archetypeGuidValue}: {material} from {path__}");
                 }
                 else
                 {
                     archetypePath = $"ArchetypeGUID={archetypeGuidValue} (path pending)";
                 }
 
-                LogVerbose($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
-
+                Console.WriteLine($"🌲 Actor spawned: ActorGUID={actorGuidValue}, Archetype={archetypePath}");
 
                 // ✅ ALWAYS tell the builder about this channel-actor mapping
                 Builder.AddActorChannel(channelIndex, actorGuidValue);
                 LogVerbose($"    ↳ Builder notified: Channel {channelIndex} ↔ Actor {actorGuidValue}");
 
                 // Track FortPlayerStateAthena
+                // Track FortPlayerStateAthena
                 if (archetypePath.Contains("FortPlayerStateAthena"))
                 {
+                    // ✅ Use the actual PlayerId from the actor
+                    var actualPlayerId = ""; // Will be set when we process the replication data
+
                     if (!actorGuidToPlayerId.ContainsKey(actorGuidValue))
                     {
-                        var newPlayerId = Guid.NewGuid().ToString();
-                        actorGuidToPlayerId[actorGuidValue] = newPlayerId;
-                        playerInfoByPlayerId[newPlayerId] = new PlayerInfo(
-                            newPlayerId,
+                        // Create mapping with actor GUID as key
+                        // We'll update with actual PlayerId when replication data arrives
+                        actorGuidToPlayerId[actorGuidValue] = $"PlayerState_{actorGuidValue}";
+
+                        playerInfoByPlayerId[$"PlayerState_{actorGuidValue}"] = new PlayerInfo(
+                            $"PlayerState_{actorGuidValue}",
                             channelIndex,
                             actorGuidValue,
-                            newPlayerId,
+                            $"PlayerState_{actorGuidValue}",
                             actorGuidValue
                         );
 
                         // ✅ Map this channel to the player
-                        channelToPlayerId[channelIndex] = newPlayerId;
+                        channelToPlayerId[channelIndex] = $"PlayerState_{actorGuidValue}";
 
                         // ✅ Track channel ownership history
                         if (!channelOwnershipHistory.ContainsKey(channelIndex))
                             channelOwnershipHistory[channelIndex] = new List<(double, string)>();
-                        channelOwnershipHistory[channelIndex].Add((currentTime, newPlayerId));
+                        channelOwnershipHistory[channelIndex].Add((currentTime, $"PlayerState_{actorGuidValue}"));
 
-                        LogVerbose($"    ↳ Registered PlayerState {actorGuidValue} → player {newPlayerId} on channel {channelIndex} at {currentTime}s");
+                        LogVerbose($"    ↳ Registered PlayerState {actorGuidValue} on channel {channelIndex}");
                     }
                 }
 
@@ -1007,21 +1113,30 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                     channelToActorGuid[channelIndex] = actorGuidValue;
 
                     // ✅ Try to map pawn channel to player immediately
-                    if (actorGuidToPlayerId.TryGetValue(actorGuidValue, out var playerId))
+                    if (actorGuidToPlayerId.TryGetValue(actorGuidValue, out var playerId_))
                     {
-                        channelToPlayerId[channelIndex] = playerId;
+                        channelToPlayerId[channelIndex] = playerId_;
 
                         // ✅ Track channel ownership history
                         if (!channelOwnershipHistory.ContainsKey(channelIndex))
                             channelOwnershipHistory[channelIndex] = new List<(double, string)>();
-                        channelOwnershipHistory[channelIndex].Add((currentTime, playerId));
+                        channelOwnershipHistory[channelIndex].Add((currentTime, playerId_));
 
-                        LogVerbose($"    ↳ Mapped pawn channel {channelIndex} → player {playerId} at {currentTime}s");
+                        LogVerbose($"    ↳ Mapped pawn channel {channelIndex} → player {playerId_} at {currentTime}s");
                     }
                     else
                     {
                         LogVerbose($"    ↳ Tracked pawn channel {channelIndex} → ActorGUID {actorGuidValue} (player TBD)");
                     }
+                }
+
+                // ✅ NEW: Handle FortBroadcastRemoteClientInfo
+                // ✅ NEW: Handle FortBroadcastRemoteClientInfo
+                // ✅ NEW: Handle FortBroadcastRemoteClientInfo
+                if (archetypePath.Contains("FortBroadcastRemoteClientInfo"))
+                {
+                    broadcastChannels.Add(channelIndex);
+                    Console.WriteLine($"📡 BROADCAST Channel={channelIndex}, ActorGUID={actorGuidValue}");
                 }
             }
         }
@@ -1325,6 +1440,8 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 ProcessInventoryData(inventory, channelIndex, "DELTA");
                 Builder.UpdateInventory(channelIndex, inventory);
                 break;
+
+
             case FortClientObservedStat clientStat:
                 LogVerbose($"\n📊 CLIENT STAT: {clientStat.StatName} = {clientStat.StatValue}");
 
@@ -1350,41 +1467,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 }
 
                 ProcessClientStat(clientStat, channelIndex);
-                break;
-            case PlayerDamagedResourceBuilding harvest:
-                LogVerbose($"\n🪓 HARVEST EVENT DETECTED!");
-                LogVerbose($"  BuildingSMActor: {harvest.BuildingSMActor}");
-                LogVerbose($"  ResourceType: {harvest.PotentialResourceType}");
-                LogVerbose($"  ResourceCount: {harvest.PotentialResourceCount}");
-                LogVerbose($"  Destroyed: {harvest.bDestroyed}");
-                LogVerbose($"  Hit Weakspot: {harvest.bJustHitWeakspot}");
-                LogVerbose($"  Channel: {channelIndex}");
-
-                // Get player ID from channel
-                var actorGuid = channelToActorGuid.GetValueOrDefault(channelIndex);
-                var playerId = GetPlayerIdFromActor(actorGuid);
-
-                LogVerbose($"  Player: {playerId}");
-
-                // Determine material type
-                string materialType = harvest.PotentialResourceType switch
-                {
-                    0 => "Wood",
-                    1 => "Stone",
-                    2 => "Metal",
-                    _ => "Unknown"
-                };
-
-                // Record the harvest
-                HarvestTracker.RecordDirectHarvest(
-                    playerId,
-                    materialType,
-                    harvest.PotentialResourceCount,
-                     harvest.bJustHitWeakspot == true,
-                    (float) Builder.GetCurrentTimeDouble()
-                );
-
-                LogVerbose($"✓ Recorded: {playerId} harvested {harvest.PotentialResourceCount} {materialType}");
                 break;
 
             default:
@@ -1650,8 +1732,36 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         return "Unknown";
     }
 
-    private Dictionary<string, string> persistentIdMappingHistory = new();
+    private Dictionary<uint, string> _ownerActorGuidToPlayerId = new();
+    private Dictionary<uint, uint> _channelToOwner = new();
+    private Dictionary<uint, string> _ownerGuidToPlayerId = new();
 
+    private string GetMaterialFromActorName(string baseName)
+    {
+        // Harvestable materials
+        if (baseName.Contains("Rock") || baseName.Contains("Boulder") || baseName.Contains("FlintRaw"))
+            return "Stone";
+        if (baseName.Contains("Tree") || baseName.Contains("Fence") || baseName.Contains("Wooden") || baseName.Contains("WoodenFence") || baseName.Contains("WoodCrate") || baseName.Contains("Container_Wood") || baseName.Contains("Crate"))
+            return "Wood";
+        if (baseName.Contains("MetalShelving") || baseName.Contains("Industrial_Metal") || baseName.Contains("CarpetStain_Dresser"))
+            return "Metal";
+
+        // Non-harvestable (furniture, buildings, etc)
+        if (baseName.Contains("Table") || baseName.Contains("Chair") || baseName.Contains("Bed") || baseName.Contains("Desk") || baseName.Contains("Window") || baseName.Contains("Door") || baseName.Contains("Wall") || baseName.Contains("Floor") || baseName.Contains("Tent") || baseName.Contains("Umbrella") || baseName.Contains("Roof") || baseName.Contains("Counter") || baseName.Contains("Shelving") || baseName.Contains("Fridge") || baseName.Contains("Cabinet") || baseName.Contains("Blockout"))
+            return "Furniture";
+
+        return "Unknown";
+    }
+
+    private Dictionary<uint, string> channelToBlueprintPath = new();
+    private Dictionary<uint, int?> lastHitCount = new();
+
+
+    private Dictionary<string, string> persistentIdMappingHistory = new();
+    private Dictionary<uint, uint> _broadcastChannelToPlayerChannel = new();
+
+    private HashSet<uint> harvestChannels = new();
+    private HashSet<uint> broadcastChannels = new();
 
     protected override void OnExportRead(uint channelIndex, INetFieldExportGroup? exportGroup)
     {
@@ -1742,12 +1852,17 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         switch (exportGroup)
         {
             case GameState state:
+                    
+
+
                 Builder.UpdateGameState(state);
                 break;
 
             case PlaylistInfo playlist:
                 Builder.UpdatePlaylistInfo(playlist);
                 break;
+
+
 
             case PlayerPawn pawn:
                 LogVerbose($"\n=== PLAYER PAWN UPDATE ===");
@@ -1763,223 +1878,24 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 LogVerbose($"[DEBUG] Channel: {channelIndex}");
                 break;
 
-            case FortBroadcastRemoteClientInfo remoteClientInfo:
-                LogVerbose($"\n" + new string('=', 80));
-                LogVerbose($"📡 FortBroadcastRemoteClientInfo - Channel {channelIndex}");
 
-                // ✅ DEBUG: Print what we're looking up
-                LogVerbose($"DEBUG: mostRecentActiveChannel = {mostRecentActiveChannel}");
-                LogVerbose($"DEBUG: channelToPlayerId contains {channelToPlayerId.Count} entries:");
-                foreach (var kvp in channelToPlayerId.Take(5))
-                {
-                    LogVerbose($"  Channel {kvp.Key} → Player {kvp.Value}");
-                }
-
-                // ✅ PRINT CHANNEL OWNER
-                string channelOwner = "UNKNOWN";
-                if (mostRecentActiveChannel > 0 && channelToPlayerId.TryGetValue(mostRecentActiveChannel, out var playerId))
-                {
-                    channelOwner = playerId;
-                    LogVerbose($"✅ Found owner via mostRecentActiveChannel");
-                }
-                else
-                {
-                    LogVerbose($"❌ mostRecentActiveChannel ({mostRecentActiveChannel}) not in channelToPlayerId");
-                }
-
-                LogVerbose($"Channel Owner: {channelOwner}");
-                LogVerbose(new string('=', 80));
-
-                // Get the type and print ALL properties
-                var type = remoteClientInfo.GetType();
-                var properties = type.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-
-                LogVerbose($"Total Properties: {properties.Length}");
-                LogVerbose(null);
-
-                foreach (var prop in properties)
-                {
-                    try
-                    {
-                        var value = prop.GetValue(remoteClientInfo);
-                        LogVerbose($"{prop.Name} ({prop.PropertyType.Name}):");
-                        LogVerbose($"  Value: {value ?? "NULL"}");
-
-                        // If it's a complex object, drill down completely
-                        if (value != null && !prop.PropertyType.IsPrimitive && prop.PropertyType != typeof(string) && !prop.PropertyType.IsEnum)
-                        {
-                            // Handle collections
-                            if (value is System.Collections.IEnumerable enumerable && !(value is string))
-                            {
-                                var items = enumerable.Cast<object>().ToList();
-                                LogVerbose($"  [Collection: {items.Count} items]");
-
-                                for (int i = 0; i < items.Count; i++)
-                                {
-                                    LogVerbose($"    [{i}]: {items[i]}");
-
-                                    // Print properties of collection items
-                                    if (items[i] != null)
-                                    {
-                                        var itemType = items[i].GetType();
-                                        if (!itemType.IsPrimitive && itemType != typeof(string))
-                                        {
-                                            var itemProps = itemType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                                            foreach (var itemProp in itemProps)
-                                            {
-                                                try
-                                                {
-                                                    var itemValue = itemProp.GetValue(items[i]);
-                                                    LogVerbose($"      {itemProp.Name}: {itemValue ?? "NULL"}");
-                                                }
-                                                catch (Exception ex)
-                                                {
-                                                    LogVerbose($"      {itemProp.Name}: <error: {ex.Message}>");
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                // Print all nested object properties
-                                var nestedProps = value.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                                LogVerbose($"  [Object with {nestedProps.Length} properties]");
-
-                                foreach (var nestedProp in nestedProps)
-                                {
-                                    try
-                                    {
-                                        var nestedValue = nestedProp.GetValue(value);
-                                        LogVerbose($"    {nestedProp.Name} ({nestedProp.PropertyType.Name}): {nestedValue ?? "NULL"}");
-
-                                        // Go one more level deep if needed
-                                        if (nestedValue != null && !nestedProp.PropertyType.IsPrimitive &&
-                                            nestedProp.PropertyType != typeof(string) && !nestedProp.PropertyType.IsEnum)
-                                        {
-                                            var deepProps = nestedValue.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                                            foreach (var deepProp in deepProps)
-                                            {
-                                                try
-                                                {
-                                                    var deepValue = deepProp.GetValue(nestedValue);
-                                                    LogVerbose($"      └─ {deepProp.Name}: {deepValue ?? "NULL"}");
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        LogVerbose($"    {nestedProp.Name}: <error: {ex.Message}>");
-                                    }
-                                }
-                            }
-                        }
-
-                        LogVerbose(null); // Blank line between properties
-                    }
-                    catch (Exception ex)
-                    {
-                        LogVerbose($"{prop.Name}: <ERROR: {ex.Message}>");
-                        LogVerbose(null);
-                    }
-                }
-
-                // Analysis section
-                LogVerbose(new string('-', 80));
-                LogVerbose("HARVEST HIT ANALYSIS:");
-                LogVerbose(new string('-', 80));
-
-                bool hasOwner = remoteClientInfo.Owner.HasValue;
-                bool hasParentObject = remoteClientInfo.ParentObject.HasValue;
-                bool hasPosition = remoteClientInfo.Position != null;
-
-                LogVerbose($"Has Owner: {hasOwner}");
-                if (hasOwner)
-                {
-                    LogVerbose($"  Owner Actor GUID: {remoteClientInfo.Owner.Value}");
-                }
-
-                LogVerbose($"Has ParentObject: {hasParentObject}");
-                if (hasParentObject)
-                {
-                    LogVerbose($"  ParentObject GUID: {remoteClientInfo.ParentObject.Value}");
-
-                    if (_netGuidCache.TryGetPathName(remoteClientInfo.ParentObject.Value, out var objectPath))
-                    {
-                        LogVerbose($"  Object Path: {objectPath}");
-                        var materialType = GetMaterialTypeFromArchetype(objectPath);
-                        LogVerbose($"  Material Type: {materialType}");
-
-                        if (materialType == "Wood" || materialType == "Stone" || materialType == "Metal")
-                        {
-                            LogVerbose($"  ✅ THIS IS A REAL HARVEST HIT!");
-                        }
-                        else
-                        {
-                            LogVerbose($"  ❌ NOT a harvestable material");
-                        }
-                    }
-                    else
-                    {
-                        LogVerbose($"  ⚠️ Could not resolve object path");
-                    }
-                }
-
-                LogVerbose($"Has Position: {hasPosition}");
-                if (hasPosition)
-                {
-                    LogVerbose($"  Position: {remoteClientInfo.Position}");
-                }
-
-                LogVerbose(new string('=', 80));
-                LogVerbose(null); // Extra blank line for readability
-
-                // ✅ NEW HARVEST TRACKING LOGIC - Only track broadcasts with NO owner but WITH ParentObject
-                if (!hasOwner && hasParentObject && hasPosition)
-                {
-                    var objectGuid = remoteClientInfo.ParentObject.Value;
-
-                    if (_netGuidCache.TryGetPathName(objectGuid, out var objectPath))
-                    {
-                        var materialType = GetMaterialTypeFromArchetype(objectPath);
-
-                        if (materialType == "Wood" || materialType == "Stone" || materialType == "Metal")
-                        {
-                            if (!string.IsNullOrEmpty(channelOwner) && channelOwner != "UNKNOWN")
-                            {
-                                LogVerbose($"🪓 RECORDING HARVEST: {channelOwner} hit {materialType}");
-
-                                HarvestTracker.RecordDirectHarvest(
-                                    channelOwner,
-                                    materialType,
-                                    1,
-                                    false,
-                                    (float) Builder.GetCurrentTimeDouble()
-                                );
-
-                                var blueprintClass = ExtractBlueprintClass(objectPath);
-                                if (!harvestableDatabase.Contains(blueprintClass))
-                                {
-                                    TrackUnknownHarvestable(objectPath, objectPath, channelOwner, (float) Builder.GetCurrentTimeDouble());
-                                }
-                            }
-                            else
-                            {
-                                LogVerbose($"⚠️ Cannot record harvest - channel owner unknown");
-                            }
-                        }
-                    }
-                }
-
-                break;
 
             case FortPlayerState state:
+                var channel = Channels[channelIndex];
+                var playerStateActorGuid = channel?.Actor?.ActorNetGUID?.Value;
+
                 Builder.UpdatePlayerState(channelIndex, state);
                 ProcessPlayerState(state, channelIndex);
+
+                // ✅ NEW: Map the player state actor GUID
+                var playerIdFromState = Builder.GetPlayerIdFromAnyChannel(channelIndex);
+                if (!string.IsNullOrEmpty(playerIdFromState) && playerStateActorGuid.HasValue && playerStateActorGuid.Value != 0)
+                {
+                    actorGuidToPlayerId[playerStateActorGuid.Value] = playerIdFromState;
+                    Console.WriteLine($"📊 Mapped PlayerState Actor {playerStateActorGuid.Value} → Player {playerIdFromState}");
+                }
                 break;
+
 
             case BatchedDamageCues damageCues:
                 ProcessDamage(damageCues, channelIndex);
@@ -2155,10 +2071,49 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 ProcessBuild(channelIndex, (BaseBuild) exportGroup, "Floor", "Metal");
                 break;
 
+            case FortBroadcastRemoteClientInfo remoteClientInfo:
+                harvestChannels.Add(channelIndex);
+
+                // ✅ DEBUG: Log all properties via introspection
+                var props = remoteClientInfo.GetType().GetProperties();
+                var propStrings = new List<string>();
+                foreach (var prop in props)
+                {
+                    try
+                    {
+                        var value = prop.GetValue(remoteClientInfo);
+                        propStrings.Add($"{prop.Name}={value}");
+                    }
+                    catch { }
+                }
+                Console.WriteLine($"[FBRCI] Channel {channelIndex}: {string.Join(", ", propStrings)}");
+
+                // ✅ CAPTURE: Owner GUID on first appearance and find out what it actually is
+                if (remoteClientInfo.Owner.HasValue && remoteClientInfo.Owner.Value != 0)
+                {
+                    var ownerGuid = remoteClientInfo.Owner.Value;
+
+                    // Log what archetype/path this Owner GUID actually points to
+                    if (_netGuidCache.TryGetPathName(ownerGuid, out var ownerPath))
+                    {
+                        Console.WriteLine($"🔍 [OWNER_GUID_DEBUG] Channel {channelIndex}: Owner={ownerGuid} points to {ownerPath}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"🔍 [OWNER_GUID_DEBUG] Channel {channelIndex}: Owner={ownerGuid} → <path unknown>");
+                    }
+
+                    // Store it regardless
+                    broadcastChannelToOwnerGuid[channelIndex] = ownerGuid;
+                }
+
+                break;
+
+
             case FortSafeZoneIndicatorFuture safeZoneFuture:
                 Console.WriteLine($"\n[SAFEZONE_FUTURE_DEBUG] FortSafeZoneIndicatorFuture properties:");
-                var props = safeZoneFuture.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                foreach (var prop in props)
+                var props_ = safeZoneFuture.GetType().GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                foreach (var prop in props_)
                 {
                     try
                     {
@@ -2190,289 +2145,46 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 }
                 break;
         }
+
+        // ✅ ADD THIS AFTER THE SWITCH:
+        // Register the export group by its channel's actor GUID
+        if (exportGroup != null && Channels[channelIndex]?.Actor?.ActorNetGUID != null)
+        {
+            var actorGuid = Channels[channelIndex].Actor.ActorNetGUID;
+            Builder.RegisterExportGroup(actorGuid, exportGroup);
+            Console.WriteLine($"[REGISTRY] Registered {exportGroup.GetType().Name} for actor GUID {actorGuid.Value}");
+        }
     }
 
     private void PostProcessHarvestHits()
     {
-        LogVerbose("\n" + new string('=', 80));
-        LogVerbose("=== POST-PROCESSING HARVEST HITS - SUPER VERBOSE ===");
-        LogVerbose(new string('=', 80));
+        Console.WriteLine("\n" + new string('=', 80));
+        Console.WriteLine("🎯 HARVEST TRACKING SUMMARY");
+        Console.WriteLine(new string('=', 80));
 
-        LogVerbose($"\n📊 INITIAL STATE:");
-        LogVerbose($"   unresolvedHarvestHits.Count: {unresolvedHarvestHits.Count}");
-        LogVerbose($"   unresolvedHarvestHits instance: {unresolvedHarvestHits.GetHashCode()}");
-
-        if (unresolvedHarvestHits.Count == 0)
+        Console.WriteLine($"\n📡 BROADCAST CHANNELS OPENED: {broadcastChannels.Count}");
+        foreach (var ch in broadcastChannels.OrderBy(x => x).Take(20))
         {
-            LogVerbose("\n❌ CRITICAL: unresolvedHarvestHits is EMPTY!");
-            LogVerbose("   This means either:");
-            LogVerbose("   1. No harvest hits were detected during parsing");
-            LogVerbose("   2. The list was cleared between parsing and post-processing");
-            LogVerbose("   3. We're looking at a different instance of the list");
-            return;
+            var playerId = channelToPlayerId.TryGetValue(ch, out var pid) ? pid : "UNRESOLVED";
+            Console.WriteLine($"  Channel {ch} → {playerId}");
         }
+        if (broadcastChannels.Count > 20)
+            Console.WriteLine($"  ... and {broadcastChannels.Count - 20} more");
 
-        var allPlayers = Builder.GetAllPlayers().ToList();
-        LogVerbose($"   Total players from builder: {allPlayers.Count}");
-        LogVerbose($"   Total actorGuidToPlayerId mappings: {actorGuidToPlayerId.Count}");
-
-        // ============================================================================
-        // BUILD REAL PLAYER MAP
-        // ============================================================================
-        LogVerbose($"\n" + new string('-', 80));
-        LogVerbose("BUILDING REAL PLAYER MAP");
-        LogVerbose(new string('-', 80));
-
-        var realActorToPlayer = new Dictionary<uint, string>();
-
-        foreach (var mapping in actorGuidToPlayerId)
+        Console.WriteLine($"\n🌲 CHANNELS WITH HARVESTS: {harvestChannels.Count}");
+        foreach (var ch in harvestChannels.OrderBy(x => x).Take(20))
         {
-            LogVerbose($"\n  Checking actor {mapping.Key} → {mapping.Value}");
-
-            var player = allPlayers.FirstOrDefault(p =>
-                p.PlayerId.Equals(mapping.Value, StringComparison.OrdinalIgnoreCase));
-
-            if (player == null)
-            {
-                LogVerbose($"    ❌ SKIPPED: Not found in builder");
-                continue;
-            }
-
-            LogVerbose($"    ✓ Found in builder");
-            LogVerbose($"       Name: {player.PlayerName ?? "NULL"}");
-            LogVerbose($"       Is Bot: {player.IsBot}");
-
-            if (player.IsBot)
-            {
-                LogVerbose($"    ❌ SKIPPED: Is a bot");
-                continue;
-            }
-
-            if (string.IsNullOrEmpty(player.PlayerName))
-            {
-                LogVerbose($"    ❌ SKIPPED: No player name");
-                continue;
-            }
-
-            if (player.PlayerName == player.PlayerId)
-            {
-                LogVerbose($"    ❌ SKIPPED: Name equals ID (fake player)");
-                continue;
-            }
-
-            // This is a REAL player!
-            realActorToPlayer[mapping.Key] = player.PlayerId;
-            LogVerbose($"    ✅ ADDED to real player map");
+            var playerId = channelToPlayerId.TryGetValue(ch, out var pid) ? pid : "UNRESOLVED";
+            Console.WriteLine($"  Channel {ch} → {playerId}");
         }
+        if (harvestChannels.Count > 20)
+            Console.WriteLine($"  ... and {harvestChannels.Count - 20} more");
 
-        LogVerbose($"\n✅ Real actor→player mappings: {realActorToPlayer.Count}");
+        var resolved = harvestChannels.Count(ch => channelToPlayerId.ContainsKey(ch) && !string.IsNullOrEmpty(channelToPlayerId[ch]));
+        Console.WriteLine($"\n✅ Resolved: {resolved}/{harvestChannels.Count}");
+        Console.WriteLine($"❌ Unresolved: {harvestChannels.Count - resolved}/{harvestChannels.Count}");
 
-        if (realActorToPlayer.Count == 0)
-        {
-            LogVerbose("\n❌ CRITICAL ERROR: No real player mappings found!");
-            LogVerbose("   All actors were filtered out. Reasons:");
-            LogVerbose("   - Not found in builder");
-            LogVerbose("   - Are bots");
-            LogVerbose("   - Have no player name");
-            LogVerbose("   - Name equals ID (fake players)");
-            return;
-        }
-
-        LogVerbose($"\nReal player actors: {string.Join(", ", realActorToPlayer.Keys.OrderBy(x => x))}");
-
-        // ============================================================================
-        // PROCESS EACH HARVEST HIT
-        // ============================================================================
-        LogVerbose($"\n" + new string('-', 80));
-        LogVerbose($"PROCESSING {unresolvedHarvestHits.Count} HARVEST HITS");
-        LogVerbose(new string('-', 80));
-
-        int resolved = 0;
-        int unresolved = 0;
-        int processedCount = 0;
-
-        foreach (var hit in unresolvedHarvestHits)
-        {
-            processedCount++;
-            LogVerbose($"\n[{processedCount}/{unresolvedHarvestHits.Count}] Processing harvest hit:");
-            LogVerbose($"  Owner Actor: {hit.OwnerActorGuid}");
-            LogVerbose($"  Channel: {hit.ChannelIndex}");
-            LogVerbose($"  Material: {hit.MaterialType}");
-            LogVerbose($"  Object: {hit.ObjectPath}");
-            LogVerbose($"  Time: {hit.GameTime:F2}s");
-
-            string playerId = null;
-
-            // METHOD 1: Direct lookup
-            LogVerbose($"\n  Trying Method 1: Direct actor lookup");
-            if (realActorToPlayer.TryGetValue(hit.OwnerActorGuid, out playerId))
-            {
-                LogVerbose($"    ✅ SUCCESS: Found direct match");
-                var player = allPlayers.First(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
-                LogVerbose($"    Player: {playerId}");
-                LogVerbose($"    Name: {player.PlayerName}");
-            }
-            else
-            {
-                LogVerbose($"    ❌ FAILED: Actor {hit.OwnerActorGuid} not in real player map");
-                LogVerbose($"    Available actors: {string.Join(", ", realActorToPlayer.Keys.OrderBy(x => x).Take(10))}");
-
-                // METHOD 2: Nearest-neighbor
-                LogVerbose($"\n  Trying Method 2: Nearest-neighbor search (distance <= 20)");
-
-                uint? nearestActor = null;
-                int nearestDistance = int.MaxValue;
-
-                foreach (var mapping in realActorToPlayer)
-                {
-                    int distance = Math.Abs((int) mapping.Key - (int) hit.OwnerActorGuid);
-
-                    if (processedCount <= 3) // Only log for first 3 hits
-                    {
-                        LogVerbose($"      Checking actor {mapping.Key}: distance = {distance}");
-                    }
-
-                    if (distance < nearestDistance && distance <= 20)
-                    {
-                        nearestDistance = distance;
-                        nearestActor = mapping.Key;
-                        playerId = mapping.Value;
-                    }
-                }
-
-                if (nearestActor.HasValue)
-                {
-                    LogVerbose($"    ✅ SUCCESS: Found nearby actor");
-                    LogVerbose($"    Nearest Actor: {nearestActor.Value}");
-                    LogVerbose($"    Distance: {nearestDistance}");
-                    var player = allPlayers.First(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
-                    LogVerbose($"    Player: {playerId}");
-                    LogVerbose($"    Name: {player.PlayerName}");
-                }
-                else
-                {
-                    LogVerbose($"    ❌ FAILED: No actor within distance 20");
-
-                    // Find absolute nearest for diagnostic
-                    var absoluteNearest = realActorToPlayer.Keys
-                        .Select(actor => new { actor, distance = Math.Abs((int) actor - (int) hit.OwnerActorGuid) })
-                        .OrderBy(x => x.distance)
-                        .First();
-
-                    LogVerbose($"    Nearest actor (any distance): {absoluteNearest.actor} (distance: {absoluteNearest.distance})");
-                }
-            }
-
-            // RESOLUTION RESULT
-            if (!string.IsNullOrEmpty(playerId))
-            {
-                LogVerbose($"\n  ✅ RESOLVED - Recording harvest");
-
-                var cleanId = playerId.Replace("-", "").ToLower();
-                LogVerbose($"    Clean ID: {cleanId}");
-
-                HarvestTracker.RecordDirectHarvest(cleanId, hit.MaterialType, 1, false, hit.GameTime);
-                LogVerbose($"    ✓ Recorded in HarvestTracker");
-
-                if (!string.IsNullOrEmpty(hit.ObjectPath))
-                {
-                    var blueprintClass = ExtractBlueprintClass(hit.ObjectPath);
-                    if (!harvestableDatabase.Contains(blueprintClass))
-                    {
-                        TrackUnknownHarvestable(hit.ObjectPath, hit.ObjectPath, cleanId, hit.GameTime);
-                        LogVerbose($"    ✓ Tracked as unknown harvestable");
-                    }
-                }
-
-                resolved++;
-            }
-            else
-            {
-                LogVerbose($"\n  ❌ UNRESOLVED - Could not find player");
-                unresolved++;
-            }
-
-            // Stop detailed logging after first 5 to avoid spam
-            if (processedCount >= 5)
-            {
-                LogVerbose($"\n  (Switching to summary mode after 5 hits...)");
-                break;
-            }
-        }
-
-        // CONTINUE PROCESSING REST WITHOUT VERBOSE LOGGING
-        if (unresolvedHarvestHits.Count > 5)
-        {
-            LogVerbose($"\n  Processing remaining {unresolvedHarvestHits.Count - 5} hits...");
-
-            for (int i = 5; i < unresolvedHarvestHits.Count; i++)
-            {
-                var hit = unresolvedHarvestHits[i];
-                string playerId = null;
-
-                if (realActorToPlayer.TryGetValue(hit.OwnerActorGuid, out playerId))
-                {
-                    // Direct match
-                }
-                else
-                {
-                    // Nearest neighbor
-                    uint? nearestActor = null;
-                    int nearestDistance = int.MaxValue;
-
-                    foreach (var mapping in realActorToPlayer)
-                    {
-                        int distance = Math.Abs((int) mapping.Key - (int) hit.OwnerActorGuid);
-                        if (distance < nearestDistance && distance <= 20)
-                        {
-                            nearestDistance = distance;
-                            nearestActor = mapping.Key;
-                            playerId = mapping.Value;
-                        }
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(playerId))
-                {
-                    var cleanId = playerId.Replace("-", "").ToLower();
-                    HarvestTracker.RecordDirectHarvest(cleanId, hit.MaterialType, 1, false, hit.GameTime);
-
-                    if (!string.IsNullOrEmpty(hit.ObjectPath))
-                    {
-                        var blueprintClass = ExtractBlueprintClass(hit.ObjectPath);
-                        if (!harvestableDatabase.Contains(blueprintClass))
-                        {
-                            TrackUnknownHarvestable(hit.ObjectPath, hit.ObjectPath, cleanId, hit.GameTime);
-                        }
-                    }
-
-                    resolved++;
-                }
-                else
-                {
-                    unresolved++;
-                }
-            }
-        }
-
-        // ============================================================================
-        // FINAL STATISTICS
-        // ============================================================================
-        LogVerbose($"\n" + new string('=', 80));
-        LogVerbose("FINAL STATISTICS");
-        LogVerbose(new string('=', 80));
-
-        LogVerbose($"\n✅ Successfully resolved: {resolved} harvest hits");
-        LogVerbose($"❌ Failed to resolve: {unresolved} harvest hits");
-
-        if (unresolvedHarvestHits.Count > 0)
-        {
-            LogVerbose($"📊 Success rate: {(resolved * 100.0 / unresolvedHarvestHits.Count):F1}%");
-        }
-
-        LogVerbose($"\n" + new string('=', 80));
-        LogVerbose("END OF POST-PROCESSING");
-        LogVerbose(new string('=', 80) + "\n");
+        Console.WriteLine(new string('=', 80) + "\n");
     }
 
     private object GetPropertyValue(object obj, string propertyName)
@@ -2880,16 +2592,13 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var channel = Channels[channelIndex];
         var actorGuid = channel?.Actor?.ActorNetGUID?.Value;
 
-
         var playerIdFromBuilder = Builder.GetPlayerIdFromAnyChannel(channelIndex);
-
 
         if (string.IsNullOrEmpty(playerIdFromBuilder))
         {
             LogVerbose($"⚠️ Could not get player ID from builder for channel {channelIndex}");
             return; // Exit early if we can't identify the player
         }
-
 
         // ✅ LET THE BUILDER HANDLE THE PLAYER FIRST
         // The builder creates the player and determines the correct ID format
@@ -2936,9 +2645,6 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
             LogVerbose($"   AthenaKills: NULL");
         }
 
-
-
-
         // ✅ MAP ACTOR TO THE BUILDER'S PLAYER ID
         if (actorGuid.HasValue && !string.IsNullOrEmpty(playerIdFromBuilder))
         {
@@ -2957,6 +2663,26 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
                 }
 
                 playerInfoByPlayerId[playerIdFromBuilder] = playerInfo;
+            }
+        }
+
+        // ✅ NEW: Also map the Pawn GUID if this is a pawn channel
+        // The broadcast channels have Owner pointing to the pawn, so we need this mapping
+        if (actorGuid.HasValue && actorGuid.Value != 0 && !string.IsNullOrEmpty(playerIdFromBuilder))
+        {
+            // Check if this is a pawn actor by looking at the channel's actor
+            if (channel?.Actor != null)
+            {
+                var archetypeGuid = channel.Actor.Archetype?.Value;
+                if (archetypeGuid.HasValue && _netGuidCache.TryGetPathName(archetypeGuid.Value, out var archetypePath))
+                {
+                    if (archetypePath.Contains("FortPawnAthena") || archetypePath.Contains("PlayerPawn"))
+                    {
+                        // This is a pawn - map it for broadcast channel lookup
+                        actorGuidToPlayerId[actorGuid.Value] = playerIdFromBuilder;
+                        Console.WriteLine($"🎮 Mapped Pawn {actorGuid.Value} → Player {playerIdFromBuilder}");
+                    }
+                }
             }
         }
 
@@ -3022,11 +2748,11 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         var pawnActorGuid = pawnChannel?.Actor?.ActorNetGUID?.Value;
         var playerStateActorGuid = pawn.PlayerState;
 
-        LogVerbose($"[PAWN_DEBUG] Channel: {channelIndex}, PawnUniqueID: {pawn.PawnUniqueID}, Actor: {pawnActorGuid}");
+        Console.WriteLine($"[PAWN_DEBUG] Channel: {channelIndex}, PawnUniqueID: {pawn.PawnUniqueID}, Actor: {pawnActorGuid}");
 
-        LogVerbose($"=== PLAYER PAWN on Channel {channelIndex} ===");
-        LogVerbose($"Pawn Actor GUID: {pawnActorGuid}");
-        LogVerbose($"PlayerState GUID: {playerStateActorGuid}");
+        Console.WriteLine($"=== PLAYER PAWN on Channel {channelIndex} ===");
+        Console.WriteLine($"Pawn Actor GUID: {pawnActorGuid}");
+        Console.WriteLine($"PlayerState GUID: {playerStateActorGuid}");
 
         string? pawnPlayerId = null;
 
@@ -3370,80 +3096,115 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
     private void ProcessDamage(BatchedDamageCues damageCues, uint channelIndex)
     {
+        Console.WriteLine($"\n[RAW_DAMAGE_RPC] Ch{channelIndex} received damage event");
+        Console.WriteLine($"  Magnitude: {damageCues.Magnitude} (HasValue: {damageCues.Magnitude.HasValue})");
+        Console.WriteLine($"  HitActor: {damageCues.HitActor} (HasValue: {damageCues.HitActor.HasValue})");
+        Console.WriteLine($"  bIsCritical: {damageCues.bIsCritical}");
+        Console.WriteLine($"  bIsFatal: {damageCues.bIsFatal}");
+        Console.WriteLine($"  SourceWeapon: {damageCues.SourceWeapon}");
+
         // ✅ FILTER 1: Only process if there's actual damage
         if (!damageCues.Magnitude.HasValue || damageCues.Magnitude.Value <= 0)
         {
-            LogVerbose($"[DAMAGE_FILTER_1] No magnitude");
+            Console.WriteLine($"  [FILTER_1_FAIL] Magnitude not valid: {damageCues.Magnitude}");
             return;
         }
+        Console.WriteLine($"  [FILTER_1_PASS] Magnitude = {damageCues.Magnitude.Value}");
 
         var attackerChannel = Channels[channelIndex];
         string? attackerPlayerId = null;
         if (attackerChannel?.Actor?.ActorNetGUID != null)
         {
             var attackerActorGuid = attackerChannel.Actor.ActorNetGUID.Value;
+            Console.WriteLine($"  [ATTACKER_LOOKUP] Ch{channelIndex} ActorGuid: {attackerActorGuid}");
             actorGuidToPlayerId.TryGetValue(attackerActorGuid, out attackerPlayerId);
+            Console.WriteLine($"    → PlayerId: {attackerPlayerId ?? "NOT_FOUND"}");
+        }
+        else
+        {
+            Console.WriteLine($"  [ATTACKER_LOOKUP] Ch{channelIndex} has no ActorNetGUID");
         }
 
         string? victimPlayerId = null;
         if (damageCues.HitActor.HasValue)
         {
-            actorGuidToPlayerId.TryGetValue(damageCues.HitActor.Value, out victimPlayerId);
+            var hitActorValue = damageCues.HitActor.Value;
+            Console.WriteLine($"  [VICTIM_LOOKUP] HitActor: {hitActorValue}");
+            Console.WriteLine($"    Map size: {actorGuidToPlayerId.Count}");
+            Console.WriteLine($"    Sample keys: {string.Join(", ", actorGuidToPlayerId.Keys.Take(10))}");
+
+            bool found = actorGuidToPlayerId.TryGetValue(hitActorValue, out victimPlayerId);
+            Console.WriteLine($"    → PlayerId: {victimPlayerId ?? "NOT_FOUND"} (Found: {found})");
+        }
+        else
+        {
+            Console.WriteLine($"  [VICTIM_LOOKUP] HitActor has no value");
         }
 
         // ✅ FILTER 2: Must have both attacker and victim
         if (string.IsNullOrEmpty(attackerPlayerId) || string.IsNullOrEmpty(victimPlayerId))
         {
-            LogVerbose($"[DAMAGE_FILTER_2] Missing attacker={attackerPlayerId} or victim={victimPlayerId}");
+            Console.WriteLine($"  [FILTER_2_FAIL] Missing attacker={attackerPlayerId ?? "NULL"} or victim={victimPlayerId ?? "NULL"}");
             return;
         }
+        Console.WriteLine($"  [FILTER_2_PASS] Both IDs found: {attackerPlayerId} → {victimPlayerId}");
 
         // ✅ FILTER 3: Can't damage yourself
         if (attackerPlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase))
         {
-            LogVerbose($"[DAMAGE_FILTER_3] Self damage");
+            Console.WriteLine($"  [FILTER_3_FAIL] Self damage");
             return;
         }
+        Console.WriteLine($"  [FILTER_3_PASS] Different players");
 
         // ✅ FILTER 4: Get player data and check if they're real players
         var allPlayers = Builder.GetAllPlayers().ToList();
+        Console.WriteLine($"  [FILTER_4] Total players in builder: {allPlayers.Count}");
+
         var attackerPlayer = allPlayers.FirstOrDefault(p =>
             p.PlayerId.Equals(attackerPlayerId, StringComparison.OrdinalIgnoreCase));
         var victimPlayer = allPlayers.FirstOrDefault(p =>
             p.PlayerId.Equals(victimPlayerId, StringComparison.OrdinalIgnoreCase));
 
+        Console.WriteLine($"    Attacker found: {(attackerPlayer != null ? $"{attackerPlayer.PlayerName}" : "NOT_FOUND")}");
+        Console.WriteLine($"    Victim found: {(victimPlayer != null ? $"{victimPlayer.PlayerName}" : "NOT_FOUND")}");
+
         if (attackerPlayer == null || victimPlayer == null)
         {
-            LogVerbose($"[DAMAGE_FILTER_4] Player not found: attacker={attackerPlayer}, victim={victimPlayer}");
+            Console.WriteLine($"  [FILTER_4_FAIL] Player not found in builder");
             return;
         }
 
         if (attackerPlayer.IsBot || victimPlayer.IsBot)
         {
-            LogVerbose($"[DAMAGE_FILTER_4B] Bot detected");
+            Console.WriteLine($"  [FILTER_4B_FAIL] Bot detected - Attacker.IsBot={attackerPlayer.IsBot}, Victim.IsBot={victimPlayer.IsBot}");
             return;
         }
+        Console.WriteLine($"  [FILTER_4_PASS] Both are real players");
 
         // ✅ FILTER 5: Check for valid player names
         if (string.IsNullOrEmpty(attackerPlayer.PlayerName) || string.IsNullOrEmpty(victimPlayer.PlayerName))
         {
-            LogVerbose($"[DAMAGE_FILTER_5] No player name");
+            Console.WriteLine($"  [FILTER_5_FAIL] Missing names - Attacker: '{attackerPlayer.PlayerName}', Victim: '{victimPlayer.PlayerName}'");
             return;
         }
 
         if (attackerPlayer.PlayerName.Equals(attackerPlayer.PlayerId, StringComparison.OrdinalIgnoreCase) ||
             victimPlayer.PlayerName.Equals(victimPlayer.PlayerId, StringComparison.OrdinalIgnoreCase))
         {
-            LogVerbose($"[DAMAGE_FILTER_5B] Fake player name");
+            Console.WriteLine($"  [FILTER_5B_FAIL] Fake player name");
             return;
         }
+        Console.WriteLine($"  [FILTER_5_PASS] Both have valid names");
 
         // ✅ FILTER 6: Team check
+        Console.WriteLine($"    Attacker Team: {attackerPlayer.TeamIndex}, Victim Team: {victimPlayer.TeamIndex}");
         if (attackerPlayer.TeamIndex == victimPlayer.TeamIndex && attackerPlayer.TeamIndex > 0)
         {
-            LogVerbose($"[DAMAGE_FILTER_6] Same team");
+            Console.WriteLine($"  [FILTER_6_FAIL] Same team");
             return;
         }
+        Console.WriteLine($"  [FILTER_6_PASS] Different teams");
 
         // ✅ FILTER 7: Don't count damage to knocked players
         var playerTimelines = Builder.GetPlayerStateHistory();
@@ -3466,15 +3227,16 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
 
         if (victimIsKnockedDown)
         {
-            LogVerbose($"[DAMAGE_FILTER_7] Victim knocked down");
+            Console.WriteLine($"  [FILTER_7_FAIL] Victim knocked down");
             return;
         }
+        Console.WriteLine($"  [FILTER_7_PASS] Victim not knocked");
 
         // ✅ ALL FILTERS PASSED
         uint damageAmount = (uint) damageCues.Magnitude.Value;
         DamageTracker.RecordDamage(attackerPlayerId, victimPlayerId, damageAmount, false);
 
-        LogVerbose($"💥 DAMAGE RECORDED: {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
+        Console.WriteLine($"  [DAMAGE_RECORDED] {attackerPlayer.PlayerName} → {victimPlayer.PlayerName} ({damageAmount} damage)");
     }
 
     private void AnalyzeForStats(object obj, string typeName, uint channelIndex, string? playerId = null)
@@ -4222,27 +3984,57 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         return AllPlayerStats;
     }
 
-    public async Task ExportPlayerStatsToCSVAsync(string filePath)
-    {
-        var csvLines = new List<string>();
-        var replayId = Path.GetFileNameWithoutExtension(filePath).Replace("player_stats_", "");
+    // Add this to FortniteReplayReader.cs
 
+    /// <summary>
+    /// Unified player stats model - single source of truth for all exports
+    /// Update this when adding/removing stats
+    /// </summary>
+    public class PlayerStatsExport
+    {
+        public string ReplayId { get; set; }
+        public string EpicId { get; set; }
+        public string PlayerName { get; set; }
+        public int TeamIndex { get; set; }
+        public int Eliminations { get; set; }
+        public bool WasRebooted { get; set; }
+        public double AliveSeconds { get; set; }
+        public int ZonesSurvived { get; set; }
+
+        // Building stats
+        public int TotalBuildsPlaced { get; set; }
+        public int WoodBuildsPlaced { get; set; }
+        public int StoneBuildsPlaced { get; set; }
+        public int MetalBuildsPlaced { get; set; }
+        public int WallsPlaced { get; set; }
+        public int FloorsPlaced { get; set; }
+        public int StairsPlaced { get; set; }
+        public int RoofsPlaced { get; set; }
+        public int BuildsEdited { get; set; }
+        public int BuildsDestroyed { get; set; }
+
+        // Damage stats
+        public double DamageDealt { get; set; }
+        public double DamagePerMinute { get; set; }
+        public double DamageTaken { get; set; }
+        public int ShotsHit { get; set; }
+
+        // Harvest stats
+        public int TotalMaterialsHarvested { get; set; }
+        public int WoodHarvested { get; set; }
+        public int StoneHarvested { get; set; }
+        public int MetalHarvested { get; set; }
+        public int HarvestActions { get; set; }
+    }
+
+    /// <summary>
+    /// Get all player stats in unified format
+    /// </summary>
+    private async Task<List<PlayerStatsExport>> GetAllPlayerStatsAsync(string replayId)
+    {
         double matchStart = Builder.GetMatchStartTime();
         double matchEnd = Builder.GetCurrentTimeDouble();
         DamageTracker.SetMatchTimes(matchStart, matchEnd);
-
-        var headers = new List<string>
-    {
-        "ReplayID", "EpicID", "PlayerName", "TeamIndex",
-        "Eliminations", "WasRebooted", "AliveSeconds", "ZonesSurvived",
-        "TotalBuildsPlaced", "WoodBuildsPlaced", "StoneBuildsPlaced", "MetalBuildsPlaced",
-        "WallsPlaced", "FloorsPlaced", "StairsPlaced", "RoofsPlaced", "BuildsEdited", "BuildsDestroyed",
-        "DamageDealt","DamagePerMinute", "DamageTaken", "ShotsHit",
-        "TotalMaterialsHarvested", "WoodHarvested", "StoneHarvested", "MetalHarvested", "HarvestActions"
-    };
-
-        csvLines.Add(string.Join(",", headers));
-        Console.WriteLine($"[CSV_DEBUG] Headers added: {headers.Count}");
 
         var allPlayerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         allPlayerIds.UnionWith(playerRealtimeStats.Keys);
@@ -4251,78 +4043,205 @@ public class ReplayReader : Unreal.Core.ReplayReader<FortniteReplay>
         allPlayerIds.UnionWith(BuildTracker.GetAllPlayerStats().Keys);
         allPlayerIds.UnionWith(Builder.GetAllEliminationCounts().Keys);
 
-        Console.WriteLine($"[CSV_DEBUG] Found {allPlayerIds.Count} unique players");
-        foreach (var pid in allPlayerIds.Take(5))
-        {
-            Console.WriteLine($"[CSV_DEBUG] Player: {pid}");
-        }
+        var playerStats = new List<PlayerStatsExport>();
 
         foreach (var playerId in allPlayerIds)
         {
             try
             {
-                var row = new List<string> { replayId, playerId.ToLower() };
-
                 var playerName = GetPlayerNameFromReplay(playerId);
-                if (!string.IsNullOrEmpty(playerName) && !playerName.Equals(playerId, StringComparison.OrdinalIgnoreCase))
-                {
-                    row.Add($"\"{playerName}\"");
-                }
-                else
-                {
-                    row.Add("\"\"");
-                }
-
                 var playerData = Builder.GetAllPlayers().FirstOrDefault(p => p.PlayerId.Equals(playerId, StringComparison.OrdinalIgnoreCase));
-                row.Add((playerData?.TeamIndex ?? 0).ToString());
-
-                var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId) ? Builder.GetEliminationCounts()[playerId] : 0;
-                var wasRebooted = Builder.WasPlayerRebooted(playerId) ? 1 : 0;
-                row.Add(eliminations.ToString());
-                row.Add(wasRebooted.ToString());
-
-                var aliveSeconds = Builder.GetPlayerAliveTime(playerId);
-                row.Add(aliveSeconds.ToString("F2"));
-                row.Add(Builder.GetZonesSurvived(playerId).ToString());
-
                 var buildStats = BuildTracker.GetPlayerStats(playerId);
-                row.Add(buildStats.TotalBuildsPlaced.ToString());
-                row.Add(buildStats.WoodBuilds.ToString());
-                row.Add(buildStats.StoneBuilds.ToString());
-                row.Add(buildStats.MetalBuilds.ToString());
-                row.Add(buildStats.WallsPlaced.ToString());
-                row.Add(buildStats.FloorsPlaced.ToString());
-                row.Add(buildStats.StairsPlaced.ToString());
-                row.Add(buildStats.RoofsPlaced.ToString());
-                row.Add(buildStats.BuildsEdited.ToString());
-                row.Add(buildStats.BuildsDestroyed.ToString());
-
                 var damageStats = DamageTracker.PlayerStats.ContainsKey(playerId) ? DamageTracker.PlayerStats[playerId] : null;
-                row.Add(damageStats?.TotalDamageDealt.ToString() ?? "0");
-                row.Add(DamageTracker.GetDamagePerMinute(playerId).ToString("F2"));
-                row.Add(damageStats?.TotalDamageTaken.ToString() ?? "0");
-                row.Add(damageStats?.ShotsHit.ToString() ?? "0");
-
                 var harvestStats = HarvestTracker.GetPlayerStats(playerId);
-                row.Add(harvestStats.TotalMaterialsHarvested.ToString());
-                row.Add(harvestStats.WoodHarvested.ToString());
-                row.Add(harvestStats.StoneHarvested.ToString());
-                row.Add(harvestStats.MetalHarvested.ToString());
-                row.Add(harvestStats.HarvestActions.ToString());
+                var eliminations = Builder.GetEliminationCounts().ContainsKey(playerId) ? Builder.GetEliminationCounts()[playerId] : 0;
 
-                csvLines.Add(string.Join(",", row));
-                Console.WriteLine($"[CSV_DEBUG] Added row for {playerId} ({row.Count} columns)");
+                var stats = new PlayerStatsExport
+                {
+                    ReplayId = replayId,
+                    EpicId = playerId.ToLower(),
+                    PlayerName = !string.IsNullOrEmpty(playerName) && !playerName.Equals(playerId, StringComparison.OrdinalIgnoreCase) ? playerName : string.Empty,
+                    TeamIndex = playerData?.TeamIndex ?? 0,
+                    Eliminations = eliminations,
+                    WasRebooted = Builder.WasPlayerRebooted(playerId),
+                    AliveSeconds = Builder.GetPlayerAliveTime(playerId),
+                    ZonesSurvived = Builder.GetZonesSurvived(playerId),
+
+                    TotalBuildsPlaced = buildStats.TotalBuildsPlaced,
+                    WoodBuildsPlaced = buildStats.WoodBuilds,
+                    StoneBuildsPlaced = buildStats.StoneBuilds,
+                    MetalBuildsPlaced = buildStats.MetalBuilds,
+                    WallsPlaced = buildStats.WallsPlaced,
+                    FloorsPlaced = buildStats.FloorsPlaced,
+                    StairsPlaced = buildStats.StairsPlaced,
+                    RoofsPlaced = buildStats.RoofsPlaced,
+                    BuildsEdited = buildStats.BuildsEdited,
+                    BuildsDestroyed = buildStats.BuildsDestroyed,
+
+                    DamageDealt = damageStats?.TotalDamageDealt ?? 0,
+                    DamagePerMinute = DamageTracker.GetDamagePerMinute(playerId),
+                    DamageTaken = damageStats?.TotalDamageTaken ?? 0,
+                    ShotsHit = damageStats?.ShotsHit ?? 0,
+
+                    TotalMaterialsHarvested = harvestStats.TotalMaterialsHarvested,
+                    WoodHarvested = harvestStats.WoodHarvested,
+                    StoneHarvested = harvestStats.StoneHarvested,
+                    MetalHarvested = harvestStats.MetalHarvested,
+                    HarvestActions = harvestStats.HarvestActions,
+                };
+
+                playerStats.Add(stats);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[CSV_ERROR] Failed to process {playerId}: {ex.Message}");
+                Console.WriteLine($"[EXPORT_ERROR] Failed to process {playerId}: {ex.Message}");
             }
         }
 
-        Console.WriteLine($"[CSV_DEBUG] Writing {csvLines.Count} lines to file");
+        return playerStats;
+    }
+
+    /// <summary>
+    /// Export to CSV using unified stats model
+    /// </summary>
+    public async Task ExportPlayerStatsToCSVAsync(string filePath)
+    {
+        var replayId = Path.GetFileNameWithoutExtension(filePath).Replace("player_stats_", "");
+        var playerStats = await GetAllPlayerStatsAsync(replayId);
+
+        var csvLines = new List<string>();
+
+        // Headers from PlayerStatsExport properties
+        var headers = new List<string>
+    {
+        nameof(PlayerStatsExport.ReplayId),
+        nameof(PlayerStatsExport.EpicId),
+        nameof(PlayerStatsExport.PlayerName),
+        nameof(PlayerStatsExport.TeamIndex),
+        nameof(PlayerStatsExport.Eliminations),
+        nameof(PlayerStatsExport.WasRebooted),
+        nameof(PlayerStatsExport.AliveSeconds),
+        nameof(PlayerStatsExport.ZonesSurvived),
+        nameof(PlayerStatsExport.TotalBuildsPlaced),
+        nameof(PlayerStatsExport.WoodBuildsPlaced),
+        nameof(PlayerStatsExport.StoneBuildsPlaced),
+        nameof(PlayerStatsExport.MetalBuildsPlaced),
+        nameof(PlayerStatsExport.WallsPlaced),
+        nameof(PlayerStatsExport.FloorsPlaced),
+        nameof(PlayerStatsExport.StairsPlaced),
+        nameof(PlayerStatsExport.RoofsPlaced),
+        nameof(PlayerStatsExport.BuildsEdited),
+        nameof(PlayerStatsExport.BuildsDestroyed),
+        nameof(PlayerStatsExport.DamageDealt),
+        nameof(PlayerStatsExport.DamagePerMinute),
+        nameof(PlayerStatsExport.DamageTaken),
+        nameof(PlayerStatsExport.ShotsHit),
+        nameof(PlayerStatsExport.TotalMaterialsHarvested),
+        nameof(PlayerStatsExport.WoodHarvested),
+        nameof(PlayerStatsExport.StoneHarvested),
+        nameof(PlayerStatsExport.MetalHarvested),
+        nameof(PlayerStatsExport.HarvestActions),
+    };
+
+        csvLines.Add(string.Join(",", headers));
+
+        foreach (var stats in playerStats)
+        {
+            var row = new List<string>
+        {
+            stats.ReplayId,
+            stats.EpicId,
+            $"\"{stats.PlayerName}\"",
+            stats.TeamIndex.ToString(),
+            stats.Eliminations.ToString(),
+            (stats.WasRebooted ? 1 : 0).ToString(),
+            stats.AliveSeconds.ToString("F2"),
+            stats.ZonesSurvived.ToString(),
+            stats.TotalBuildsPlaced.ToString(),
+            stats.WoodBuildsPlaced.ToString(),
+            stats.StoneBuildsPlaced.ToString(),
+            stats.MetalBuildsPlaced.ToString(),
+            stats.WallsPlaced.ToString(),
+            stats.FloorsPlaced.ToString(),
+            stats.StairsPlaced.ToString(),
+            stats.RoofsPlaced.ToString(),
+            stats.BuildsEdited.ToString(),
+            stats.BuildsDestroyed.ToString(),
+            stats.DamageDealt.ToString("F2"),
+            stats.DamagePerMinute.ToString("F2"),
+            stats.DamageTaken.ToString("F2"),
+            stats.ShotsHit.ToString(),
+            stats.TotalMaterialsHarvested.ToString(),
+            stats.WoodHarvested.ToString(),
+            stats.StoneHarvested.ToString(),
+            stats.MetalHarvested.ToString(),
+            stats.HarvestActions.ToString(),
+        };
+            csvLines.Add(string.Join(",", row));
+        }
+
         await File.WriteAllLinesAsync(filePath, csvLines);
-        LogVerbose($"\n*** CSV exported to: {filePath} ***");
-        LogVerbose($"*** Exported {allPlayerIds.Count} unique players with {headers.Count} columns ***");
+        LogVerbose($"\n*** CSV exported: {filePath} ({playerStats.Count} players) ***");
+    }
+
+    /// <summary>
+    /// Export to JSON using unified stats model - compact, production-ready format
+    /// Returns JSON object instead of writing to file
+    /// </summary>
+    public async Task<object> ExportPlayerStatsToJsonAsync(string replayId)
+    {
+        var playerStats = await GetAllPlayerStatsAsync(replayId);
+
+        var jsonOutput = new
+        {
+            replay_id = replayId,
+            export_time = DateTime.UtcNow.ToString("O"),
+            player_count = playerStats.Count,
+            players = playerStats.Select(p => new
+            {
+                epic_id = p.EpicId,
+                player_name = p.PlayerName,
+                team = p.TeamIndex,
+                stats = new
+                {
+                    eliminations = p.Eliminations,
+                    rebooted = p.WasRebooted,
+                    alive_seconds = Math.Round(p.AliveSeconds, 2),
+                    zones_survived = p.ZonesSurvived,
+                    builds = new
+                    {
+                        total = p.TotalBuildsPlaced,
+                        wood = p.WoodBuildsPlaced,
+                        stone = p.StoneBuildsPlaced,
+                        metal = p.MetalBuildsPlaced,
+                        walls = p.WallsPlaced,
+                        floors = p.FloorsPlaced,
+                        stairs = p.StairsPlaced,
+                        roofs = p.RoofsPlaced,
+                        edited = p.BuildsEdited,
+                        destroyed = p.BuildsDestroyed,
+                    },
+                    damage = new
+                    {
+                        dealt = Math.Round(p.DamageDealt, 2),
+                        per_minute = Math.Round(p.DamagePerMinute, 2),
+                        taken = Math.Round(p.DamageTaken, 2),
+                        shots_hit = p.ShotsHit,
+                    },
+                    harvesting = new
+                    {
+                        total = p.TotalMaterialsHarvested,
+                        wood = p.WoodHarvested,
+                        stone = p.StoneHarvested,
+                        metal = p.MetalHarvested,
+                        actions = p.HarvestActions,
+                    }
+                }
+            }).ToList()
+        };
+
+        LogVerbose($"\n*** JSON exported: {playerStats.Count} players ***");
+        return jsonOutput;
     }
 
 

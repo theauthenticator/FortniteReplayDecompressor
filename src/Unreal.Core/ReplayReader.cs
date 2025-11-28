@@ -19,7 +19,7 @@ public abstract class ReplayReader<T> where T : Replay, new()
 
     private bool _logAnything = false;
 
-    
+
 
 
     /// <summary> 
@@ -1688,11 +1688,11 @@ public abstract class ReplayReader<T> where T : Replay, new()
             {
                 if (field != null)
                 {
-                    //_logger?.LogWarning($"  Export: Name={field.Name}, Handle={field.Handle}");
+                    _logger?.LogWarning($" [FortBroadcastRemoteClientInfo]  Export: Name={field.Name}, Handle={field.Handle}");
                 }
                 else
                 {
-                    // _logger?.LogWarning("   Export: <null>");
+                    _logger?.LogWarning($" [FortBroadcastRemoteClientInfo]  Export: <null>");
                 }
             }
         }
@@ -1749,7 +1749,7 @@ public abstract class ReplayReader<T> where T : Replay, new()
             // Add this RIGHT AFTER the numBits line:
             if (group.PathName == "/Script/FortniteGame.FortBroadcastRemoteClientInfo" && numBits > 0)
             {
-                _logger?.LogWarning("Reading property: handle={}, name={}, numBits={}", handle, export?.Name, numBits);
+                _logger?.LogWarning("[RPC] Reading property: handle={}, name={}, numBits={}", handle, export?.Name, numBits);
 
                 if (group.PathName.Contains("Pickaxe"))
                 {
@@ -1845,6 +1845,10 @@ public abstract class ReplayReader<T> where T : Replay, new()
         if (!netDeltaUpdate && hasdata)
         {
             OnExportRead(channelIndex, exportGroup);
+        }
+        else if (netDeltaUpdate)
+        {
+            _logger?.LogWarning($"[DELTA] Skipping OnExportRead for {group.PathName} - netDeltaUpdate=true");
         }
 
         if (Channels[channelIndex].IsIgnoringGroup(group.PathName) && _parseMode != ParseMode.Debug)
